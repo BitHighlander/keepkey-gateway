@@ -3,5 +3,23 @@
   "name": "keepkey-gateway",
   "main": "src/index.ts",
   "compatibility_date": "2026-08-01",
-  "compatibility_flags": ["nodejs_compat"]
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+  "containers": [
+    {
+      "name": "keepkey-gateway-container",
+      "class_name": "PioneerContainer",
+      "image": "./container/Dockerfile",
+      "instance_type": "standard-2",
+      "max_instances": 3
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      { "name": "PIONEER_CONTAINER", "class_name": "PioneerContainer" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["PioneerContainer"] }
+  ]
 }

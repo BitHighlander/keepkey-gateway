@@ -10,6 +10,9 @@
     "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit"
   },
+  "dependencies": {
+    "@cloudflare/containers": "^0.3.7"
+  },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260820.1",
     "typescript": "^5.8.3",

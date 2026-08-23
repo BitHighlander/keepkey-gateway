@@ -12,7 +12,20 @@ of a self-managed Kubernetes cluster on DigitalOcean.
 - `pioneer-server-v3` depends on Redis for caching/pending-balance overlays.
   This rework removes that dependency — target state uses Cloudflare-native
   primitives (Durable Objects / KV / cache) instead of a managed Redis.
+- Mongo is being retired in favor of Postgres.
+- Bun everywhere — the container runtime and (once there's real tooling
+  beyond Wrangler) the repo's own scripts.
 - OSS from the start, hosted under `bithighlander` for now.
+
+## Architecture
+
+A Cloudflare Worker (`src/index.ts`) proxies every request to a single
+container-backed Durable Object (`PioneerContainer`). The container
+(`./container`, Bun) is where pioneer's actual server logic will live —
+right now it's a minimal health + WebSocket-echo stub proving the
+Worker → Container → WebSocket path end-to-end. Pattern taken from
+DegenQuest's proven Cloudflare Containers cutover
+(`projects/game/deploy/core-container` in the DegenQuest-v41 repo).
 
 ## Status
 
@@ -31,9 +44,9 @@ Bootstrapping. Not yet handling real traffic.
 ## Development
 
 ```bash
-npm install
-npm run dev       # wrangler dev
-npm run deploy    # wrangler deploy
+bun install
+bun run dev       # wrangler dev
+bun run deploy    # wrangler deploy
 ```
 
 ## License
