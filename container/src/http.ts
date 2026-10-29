@@ -330,6 +330,35 @@ export function createApp({ database, zerion, evm, market, utxo, portfolio, hist
 					return json(await evm.getTokenBalance(decodeURIComponent(tokenBalanceMatch[1]), tokenBalanceMatch[2], tokenBalanceMatch[3]), 200, requestId);
 				}
 
+				if (request.method === "POST" && url.pathname === "/api/v1/evm/rpc") {
+					if (!evm) throw new HttpError(503, "feature_unavailable", "EVM RPC is not configured");
+					await authenticated();
+					const body = await bodyObject(request);
+					return json(await evm.readRpc(body.networkId, body.method, body.params), 200, requestId, { "Cache-Control": "no-store" });
+				}
+
+				const evmLookupMatch = url.pathname.match(/^\/api\/v1\/evm\/lookup\/([^/]+)\/([^/]+)$/);
+				if (request.method === "GET" && evmLookupMatch) {
+					if (!evm) throw new HttpError(503, "feature_unavailable", "EVM RPC is not configured");
+					await authenticated();
+					return json(await evm.lookupTransaction(decodeURIComponent(evmLookupMatch[1]), decodeURIComponent(evmLookupMatch[2])), 200, requestId, { "Cache-Control": "no-store" });
+				}
+
+				if (request.method === "POST" && url.pathname === "/api/v1/evm/token/lookup") {
+					if (!evm) throw new HttpError(503, "feature_unavailable", "EVM RPC is not configured");
+					await authenticated();
+					const body = await bodyObject(request);
+					return json(await evm.getTokenMetadata(String(body.networkId ?? ""), String(body.contractAddress ?? "")), 200, requestId);
+				}
+
+				const allowanceMatch = url.pathname.match(/^\/api\/v1\/evm\/token\/allowance\/([^/]+)\/([^/]+)\/([^/]+)\/([^/]+)$/);
+				if (request.method === "GET" && allowanceMatch) {
+					if (!evm) throw new HttpError(503, "feature_unavailable", "EVM RPC is not configured");
+					await authenticated();
+					const [networkId, contract, owner, spender] = allowanceMatch.slice(1).map(decodeURIComponent);
+					return json(await evm.getTokenAllowance(networkId, contract, owner, spender), 200, requestId, { "Cache-Control": "no-store" });
+				}
+
 				const pubkeyMatch = url.pathname.match(/^\/api\/v1\/utxo\/pubkey-info\/([^/]+)\/(.+)$/);
 				if (request.method === "GET" && pubkeyMatch) {
 					if (!utxo) throw new HttpError(503, "feature_unavailable", "UTXO provider is not configured");

@@ -65,6 +65,10 @@ deployed route mappings:
 | P0 | `GetTokenDecimals` | `GET /evm/token/decimals/{networkId}/{contractAddress}` | ERC-20 metadata |
 | P0 | `GetNonceByNetwork` | `GET /evm/nonce/{networkId}/{address}` | EVM nonce |
 | P0 | `GetGasPriceByNetwork` | `GET /evm/gas-price/{networkId}` | EVM gas price |
+| P0 | `LookupTx` | `GET /evm/lookup/{networkId}/{txid}` | EVM receipt (`data.receipt`, `null` until mined) |
+| P0 | `EvmReadRpc` | `POST /evm/rpc` | Read-only `eth_call`/`eth_getCode`/`eth_blockNumber`/`eth_simulateV1`, raw result in `data` |
+| P0 | `LookupTokenMetadata` | `POST /evm/token/lookup` | ERC-20 `data.{symbol,name,decimals}`; 422 when not a token |
+| P0 | `GetTokenAllowance` | `GET /evm/token/allowance/{networkId}/{contractAddress}/{ownerAddress}/{spenderAddress}` | ERC-20 `data.allowance` in base units |
 | P0 | `GetAccountInfo` | `GET /getAccountInfo/{network}/{address}` | Cosmos/XRP signing state |
 | P0 | `GetTransactionHistory` | `POST /tx/history` | Activity and report history |
 | P0 | `BuildSolanaTransfer` | `POST /solana/build-transfer` | Native SOL transaction construction |

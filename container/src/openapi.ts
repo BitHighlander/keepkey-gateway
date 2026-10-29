@@ -224,6 +224,41 @@ export function openApiDocument(requestUrl: string): Record<string, unknown> {
 			"/evm/token/balance/{networkId}/{address}/{contractAddress}": {
 				get: { operationId: "GetTokenBalance", security: [{ queryKey: [] }], parameters: [pathParameter("networkId"), pathParameter("address"), pathParameter("contractAddress")], responses: providerResponses("ERC-20 balance") },
 			},
+			"/evm/rpc": {
+				post: {
+					operationId: "EvmReadRpc",
+					security: [{ queryKey: [] }],
+					requestBody: { required: true, content: { "application/json": { schema: {
+						type: "object",
+						required: ["networkId", "method", "params"],
+						properties: {
+							networkId: { type: "string", pattern: "^eip155:[1-9][0-9]*$" },
+							method: { type: "string", enum: ["eth_call", "eth_getCode", "eth_blockNumber", "eth_simulateV1"] },
+							params: { type: "array", items: {} },
+						},
+					} } } },
+					responses: { ...providerResponses("{ success: true, data: <raw JSON-RPC result> }"), 400: { description: "Invalid network, disallowed method, or params not an array" } },
+				},
+			},
+			"/evm/lookup/{networkId}/{txid}": {
+				get: { operationId: "LookupTx", security: [{ queryKey: [] }], parameters: [pathParameter("networkId"), pathParameter("txid")], responses: providerResponses("{ success: true, data: { tx, receipt } }; receipt is null until mined") },
+			},
+			"/evm/token/lookup": {
+				post: {
+					operationId: "LookupTokenMetadata",
+					security: [{ queryKey: [] }],
+					requestBody: { required: true, content: { "application/json": { schema: objectBody(["networkId", "contractAddress"]) } } },
+					responses: providerResponses("{ success: true, data: { name, symbol, decimals, contractAddress, networkId, chainId, caip } }; 422 when not an ERC-20 here"),
+				},
+			},
+			"/evm/token/allowance/{networkId}/{contractAddress}/{ownerAddress}/{spenderAddress}": {
+				get: {
+					operationId: "GetTokenAllowance",
+					security: [{ queryKey: [] }],
+					parameters: [pathParameter("networkId"), pathParameter("contractAddress"), pathParameter("ownerAddress"), pathParameter("spenderAddress")],
+					responses: providerResponses("{ success: true, data: { allowance, owner, spender, token } }; allowance in base units"),
+				},
+			},
 			"/utxo/pubkey-info/{network}/{xpub}": {
 				get: { operationId: "GetPubkeyInfo", security: [{ queryKey: [] }], parameters: [pathParameter("network"), pathParameter("xpub")], responses: providerResponses("Blockbook public-key discovery") },
 			},
