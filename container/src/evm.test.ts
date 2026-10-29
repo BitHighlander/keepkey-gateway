@@ -244,6 +244,13 @@ describe("EVM read routes", () => {
 		expect(allowance.data).toMatchObject({ allowance: "1000000", owner: OWNER, spender: SPENDER });
 	});
 
+	test("GetTokenBalance carries the human balance as both balance and v3's data", async () => {
+		const { client } = fakeNode((_method, params) => ({ result: params[0].data === "0x313ce567" ? uint(6n) : uint(1_500_000n) }));
+		const balanceApp = createApp({ config: {} as AppConfig, database, evm: client });
+		const response = await balanceApp.fetch(new Request(`http://gateway.test/api/v1/evm/token/balance/eip155:8453/${OWNER}/${USDC}`, { headers: { Authorization: "good-key" } }));
+		expect(await response.json()).toEqual({ balance: "1.5", data: "1.5" });
+	});
+
 	test("refuse write methods and unauthenticated callers with an error status", async () => {
 		const write = await call("/evm/rpc", { method: "POST", body: JSON.stringify({ networkId: "eip155:8453", method: "eth_sendRawTransaction", params: ["0x00"] }) });
 		expect(write.status).toBe(400);

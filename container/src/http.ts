@@ -327,7 +327,9 @@ export function createApp({ database, zerion, evm, market, utxo, portfolio, hist
 				if (request.method === "GET" && tokenBalanceMatch) {
 					if (!evm) throw new HttpError(503, "feature_unavailable", "EVM RPC is not configured");
 					await authenticated();
-					return json(await evm.getTokenBalance(decodeURIComponent(tokenBalanceMatch[1]), tokenBalanceMatch[2], tokenBalanceMatch[3]), 200, requestId);
+					const result = await evm.getTokenBalance(decodeURIComponent(tokenBalanceMatch[1]), tokenBalanceMatch[2], tokenBalanceMatch[3]);
+					// Desktop reads `balance` (txbuilder) and v3's `data` (pioneer-evm eth_call path).
+					return json({ ...result, data: result.balance }, 200, requestId);
 				}
 
 				if (request.method === "POST" && url.pathname === "/api/v1/evm/rpc") {
