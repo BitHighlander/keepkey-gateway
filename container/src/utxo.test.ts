@@ -90,7 +90,7 @@ describe("UtxoClient", () => {
 
 	test("returns empty history when Blockbook omits transactions for an unused xpub", async () => {
 		const fakeFetch = async () => Response.json({ page: 1, totalPages: 1, itemsOnPage: 50, balance: "0", txs: 0 });
-		const client = new UtxoClient({ apiKey: "test", cache: new TestCache(), networks: [NETWORK], fetch: fakeFetch as typeof fetch });
+		const client = new UtxoClient({ apiKey: "test", cache: new TestCache(), networks: [NETWORK], fetch: fakeFetch as unknown as typeof fetch });
 		expect(await client.getTransactionHistory(NETWORK.networkId, XPUB)).toEqual([]);
 	});
 });
