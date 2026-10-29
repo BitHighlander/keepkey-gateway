@@ -12,6 +12,6 @@ typecheck:
 dev:
 	bun run dev
 
-# Publishes to Cloudflare. Owner-only: never run from an agent session.
+# Publishes to Cloudflare. CI runs this on every push to master (.github/workflows/deploy.yml).
 deploy:
 	bun run deploy
