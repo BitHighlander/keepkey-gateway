@@ -155,4 +155,32 @@ describe("PostgreSQL pending swap contract", () => {
 		expect(urls[0]).toContain("midgard.thorchain.network");
 		expect(urls[1]).toContain("gateway.liquify.com/chain/thorchain_midgard");
 	});
+
+	test("UpdatePendingSwap sets Desktop's Relay request id without an upstream call", async () => {
+		const database = fakeDatabase();
+		const service = new PendingSwapService(database, { fetch: (async () => { throw new Error("no upstream on update"); }) as unknown as typeof fetch });
+		const { relayData: _omit, ...withoutRelay } = valid;
+		await service.create("client-a", withoutRelay);
+		await database.updatePendingSwap("client-a", "0xabcdef0123456789", "confirming", { relayData: { requestId: "other", relayStatus: "pending" } });
+		const updated = await service.update("client-a", "0xABCDEF0123456789", { relayData: { requestId: "relay-request" } });
+		expect(updated?.relayData).toEqual({ requestId: "relay-request" });
+		expect(updated?.status).toBe("confirming");
+		const again = await service.update("client-a", "0xabcdef0123456789", { relayData: { requestId: "relay-request" } });
+		expect(again?.relayData).toEqual({ requestId: "relay-request" });
+	});
+
+	test("UpdatePendingSwap is 404 for an unknown or another client's swap", async () => {
+		const database = fakeDatabase();
+		const service = new PendingSwapService(database);
+		await service.create("client-a", valid);
+		expect(await service.update("client-b", valid.txHash, { relayData: { requestId: "x-request" } })).toBeNull();
+		expect(await service.update("client-a", "0x9999999999999999", { relayData: { requestId: "x-request" } })).toBeNull();
+	});
+
+	test("UpdatePendingSwap accepts only relayData.requestId", async () => {
+		const service = new PendingSwapService(fakeDatabase());
+		for (const body of [{ status: "completed" }, { relayData: { requestId: "ok" }, status: "completed" }, { relayData: { requestId: "ok", relayStatus: "success" } }, { relayData: { requestId: "has space" } }, { relayData: {} }, {}]) {
+			await expect(service.update("client-a", valid.txHash, body)).rejects.toBeInstanceOf(PendingSwapError);
+		}
+	});
 });

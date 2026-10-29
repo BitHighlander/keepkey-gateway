@@ -65,6 +65,17 @@ export function openApiDocument(requestUrl: string): Record<string, unknown> {
 					parameters: [pathParameter("txHash"), { name: "rescan", in: "query", required: false, schema: { type: "boolean", default: false } }],
 					responses: { 200: { description: "Durable pending swap state" }, 401: { description: "Unauthorized" }, 404: { description: "Pending swap not found" } },
 				},
+				put: {
+					operationId: "UpdatePendingSwap",
+					security: [{ queryKey: [] }],
+					parameters: [pathParameter("txHash")],
+					requestBody: { required: true, content: { "application/json": { schema: {
+						type: "object",
+						required: ["relayData"],
+						properties: { relayData: { type: "object", required: ["requestId"], properties: { requestId: { type: "string" } } } },
+					} } } },
+					responses: { 200: { description: "Updated pending swap state" }, 400: { description: "Only relayData.requestId can be updated" }, 401: { description: "Unauthorized" }, 404: { description: "Pending swap not found" } },
+				},
 			},
 			"/quote": {
 				post: {

@@ -60,6 +60,23 @@ export class PendingSwapService {
 		return response(refreshed || stored);
 	}
 
+	/** UpdatePendingSwap. Desktop's only update is the Relay request id it
+	 * resolves after broadcast, so that is the only field accepted. */
+	async update(clientId: string, rawTxHash: string, raw: Record<string, unknown>): Promise<Record<string, unknown> | null> {
+		const txHash = normalizeTxHash(validateTxHash(rawTxHash));
+		const relay = Object.keys(raw).length === 1 ? object(raw.relayData, "relayData") : null;
+		if (!relay || Object.keys(relay).length !== 1) throw new PendingSwapError(400, "Only relayData.requestId can be updated");
+		const requestId = requiredString(relay.requestId, "relayData.requestId", 256);
+		if (/\s/.test(requestId)) throw new PendingSwapError(400, "relayData.requestId must not contain whitespace");
+		const stored = await this.database.getPendingSwap(clientId, txHash);
+		if (!stored) return null;
+		if (objectOrEmpty(stored.payload.relayData).requestId === requestId) return response(stored);
+		// Status fields derived from a different request id would be wrong; the
+		// next read re-derives them from Relay.
+		const updated = await this.database.updatePendingSwap(clientId, txHash, stored.status, { relayData: { requestId } });
+		return updated ? response(updated) : null;
+	}
+
 	private async refreshMidgard(clientId: string, txHash: string, stored: StoredPendingSwap): Promise<StoredPendingSwap | null> {
 		const protocol = midgardProtocol(stored.payload);
 		if (!protocol) return stored;

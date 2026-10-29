@@ -235,6 +235,14 @@ export function createApp({ database, zerion, evm, market, utxo, portfolio, hist
 					return json(swap, 200, requestId, { "Cache-Control": "no-store" });
 				}
 
+				if (request.method === "PUT" && pendingSwapMatch) {
+					if (!pendingSwaps) throw new HttpError(503, "feature_unavailable", "Pending swap storage is unavailable");
+					const client = await authenticated();
+					const swap = await pendingSwaps.update(client.id, decodeURIComponent(pendingSwapMatch[1]), await bodyObject(request));
+					if (!swap) throw new HttpError(404, "pending_swap_not_found", "Pending swap not found");
+					return json(swap, 200, requestId, { "Cache-Control": "no-store" });
+				}
+
 				if (request.method === "POST" && url.pathname === "/api/v1/market/info") {
 					if (!market) throw new HttpError(503, "feature_unavailable", "Market pricing is not configured");
 					await authenticated();

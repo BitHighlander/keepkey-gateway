@@ -21,4 +21,12 @@ describe("OpenAPI Vault contract", () => {
 		expect(allowance.operationId).toBe("GetTokenAllowance");
 		expect(allowance.parameters.map((parameter: any) => parameter.name)).toEqual(["networkId", "contractAddress", "ownerAddress", "spenderAddress"]);
 	});
+
+	test("UpdatePendingSwap is a PUT on the pending swap path with a body", () => {
+		const document = openApiDocument("http://127.0.0.1:12000/spec/swagger.json") as any;
+		const update = document.paths["/swaps/pending/{txHash}"].put;
+		expect(update.operationId).toBe("UpdatePendingSwap");
+		expect(update.parameters.map((parameter: any) => parameter.name)).toEqual(["txHash"]);
+		expect(update.requestBody.content["application/json"].schema.required).toEqual(["relayData"]);
+	});
 });
