@@ -5,13 +5,34 @@
   "compatibility_date": "2026-08-01",
   "compatibility_flags": ["nodejs_compat"],
   "observability": { "enabled": true },
+  "workers_dev": true,
+  "routes": [
+    { "pattern": "oracles.cc/*", "zone_name": "oracles.cc" }
+  ],
+  "vars": {
+    "PORT": "12000",
+    "DATABASE_MAX_CONNECTIONS": "5",
+    "HIVE_ONBOARDING_ENABLED": "false"
+  },
+  "secrets": {
+    "required": [
+      "DATABASE_URL",
+      "ZERION_API_KEY",
+      "NOWNODES_API_KEY",
+      "COINGECKO_API_KEY",
+      "SWAPKIT_API_KEY",
+      "ZEROX_API_KEY"
+    ]
+  },
   "containers": [
     {
       "name": "keepkey-gateway-container",
       "class_name": "PioneerContainer",
       "image": "./container/Dockerfile",
+      "image_build_context": ".",
       "instance_type": "standard-2",
-      "max_instances": 3
+      "max_instances": 3,
+      "rollout_step_percentage": 100
     }
   ],
   "durable_objects": {

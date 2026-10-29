@@ -7,13 +7,27 @@
   "license": "MIT",
   "scripts": {
     "dev": "wrangler dev",
+    "dev:container": "bun --watch container/server.ts",
+    "local": "docker compose up --build",
+    "db:up": "docker compose up -d postgres",
+    "db:down": "docker compose down",
     "deploy": "wrangler deploy",
-    "typecheck": "tsc --noEmit"
+    "test": "bun test container src",
+    "test:portfolio-client": "bun container/live/portfolio-client.mjs",
+    "test:live": "bun --env-file=.env container/live/local.ts",
+    "test:live:remote": "bun --env-file=.env container/live/run.ts",
+    "test:vault-client": "bun --env-file=.env container/live/vault-client-local.mjs",
+    "test:vault-client:remote": "bun --env-file=.env container/live/vault-client.mjs",
+    "typecheck": "tsc --noEmit && tsc -p container/tsconfig.json"
   },
   "dependencies": {
-    "@cloudflare/containers": "^0.3.7"
+    "@cloudflare/containers": "^0.3.7",
+    "@solana/web3.js": "^1.95.0",
+    "ethers": "6.17.0",
+    "hive-tx": "7.2.1"
   },
   "devDependencies": {
+    "@types/bun": "^1.3.14",
     "@cloudflare/workers-types": "^5.20260820.1",
     "typescript": "^5.8.3",
     "wrangler": "^4.125.0"

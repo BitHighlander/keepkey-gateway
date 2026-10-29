@@ -1,0 +1,12 @@
+.git
+.env
+.env.*
+!.env.example
+.wrangler
+artifacts
+node_modules
+*.log
+container/node_modules
+container/live
+container/*.test.ts
+container/src/*.test.ts
