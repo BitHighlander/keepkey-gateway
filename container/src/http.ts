@@ -1,4 +1,5 @@
 import { constants as zlibConstants } from "node:zlib";
+import buildInfo from "../data/build-info.json";
 import type { AppConfig } from "./config";
 import { DisabledClientError, type Database } from "./database";
 import { openApiDocument } from "./openapi";
@@ -97,6 +98,7 @@ export function createApp({ database, zerion, evm, market, utxo, portfolio, hist
 					return json({
 						status: "ok",
 						service: "keepkey-gateway",
+						revision: buildInfo.revision,
 						runtime: {
 							bun: Bun.version,
 							brotliBlockSwitch: (zlibConstants as Record<string, number | undefined>).BROTLI_DECODER_ERROR_FORMAT_BLOCK_SWITCH ?? null,

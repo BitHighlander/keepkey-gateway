@@ -80,6 +80,10 @@ The hosted gateway is available at `https://oracles.cc`. Wrangler declares the
 `https://oracles.cc/api/v1/health` and the API contract at
 `https://oracles.cc/spec/swagger.json`.
 
+CI stamps the commit into the container image. Deployment verification waits
+for `/api/v1/health` to report that exact `revision` and a healthy database;
+a healthy previous image during rollout does not satisfy the check.
+
 The Worker rewrites OpenAPI server URLs using the public request origin because
 container forwarding uses HTTP internally. Advertising that internal scheme
 causes SDK POSTs to lose their method and body on an HTTP-to-HTTPS 301 redirect.
