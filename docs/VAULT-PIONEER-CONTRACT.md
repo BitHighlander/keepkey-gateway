@@ -66,7 +66,7 @@ deployed route mappings:
 | P0 | `GetNonceByNetwork` | `GET /evm/nonce/{networkId}/{address}` | EVM nonce |
 | P0 | `GetGasPriceByNetwork` | `GET /evm/gas-price/{networkId}` | EVM gas price |
 | P0 | `LookupTx` | `GET /evm/lookup/{networkId}/{txid}` | EVM receipt (`data.receipt`, `null` until mined) |
-| P0 | `EvmReadRpc` | `POST /evm/rpc` | Read-only `eth_call`/`eth_getCode`/`eth_blockNumber`/`eth_simulateV1`, raw result in `data` |
+| P0 | `EvmReadRpc` | `POST /evm/rpc` | Read-only call, gas estimation, fee history, code, block number, simulation and bounded call tracing; raw result in `data` |
 | P0 | `LookupTokenMetadata` | `POST /evm/token/lookup` | ERC-20 `data.{symbol,name,decimals}`; 422 when not a token |
 | P0 | `GetTokenAllowance` | `GET /evm/token/allowance/{networkId}/{contractAddress}/{ownerAddress}/{spenderAddress}` | ERC-20 `data.allowance` in base units |
 | P0 | `GetAccountInfo` | `GET /getAccountInfo/{network}/{address}` | Cosmos/XRP signing state |
@@ -247,6 +247,39 @@ The legacy quote shape has drifted across integrations. v5 acceptance must use
 sanitized golden fixtures for every enabled swapper and representative pair;
 do not replace it with a hand-authored “close enough” schema.
 
+Native EVM inputs with prebuilt contract calldata receive a fresh
+`eth_estimateGas` check on the source chain at `pending` before they are offered.
+An invalid/reverting route is discarded so other providers or fallback tiers can
+run. The returned gas limit is the greater of the provider limit and the fresh
+estimate. Vault adds its gas buffer and must still check the final unsigned call
+before signing, after any ERC-20 approval. Quotes are not guarantees of future
+execution. ERC-20 inputs are not estimated before approval.
+
+`quote.meta.routeDiagnostics` contains `selectedTier`, `fallback` and `attempts`
+with provider, outcome, timestamp and failure reason. Direct providers run first;
+ShapeShift remains a fallback, including Chainflip. No direct Chainflip broker
+is configured. `quote.meta.feeBreakdown` distinguishes the KeepKey partner and
+ShapeShift basis points from network fees in their provider-reported units.
+Relay exposes its configured 30 bps app fee separately from price impact and
+preserves the provider's gas/relayer fee objects. Its normalized `total_bps`
+represents that app fee, not all execution costs. Source-native gas amounts and
+basis points must never be formatted as destination-token base units.
+
+`GET /swap/health` performs no upstream requests. It reports recent in-process
+quote observations with `checkedAt` and `checkScope: "quote"`; observations
+expire after five minutes and reset on container restart. Success for one pair
+is not global provider health. Failure for one pair is `degraded`, not proof of
+an outage. Unconfigured providers remain `disabled`; untested configured
+providers are `unknown`. Route-specific failure reasons belong to authenticated
+quote responses, not the public health feed.
+
+The read RPC allowlist includes `eth_call`, `eth_estimateGas`, `eth_feeHistory`,
+`eth_getCode`, `eth_blockNumber`, `eth_simulateV1` and `debug_traceCall`.
+Transaction quantities are converted to minimal JSON-RPC hex; calldata,
+addresses and storage words are preserved. Fee history is capped at 100 blocks.
+Tracing accepts only `callTracer` with a maximum five-second timeout. Node
+HTTP 405 means unsupported capability (422), not a provider outage (502).
+
 ### Pending swaps
 
 Registration includes `txHash`, sell/buy CAIP asset objects, quote metadata,
@@ -258,6 +291,19 @@ Vault reads status, inbound and outbound confirmations, protocol-specific
 outbound hashes, Relay request/output identifiers, swapper/protocol identity,
 actionable error fields, time estimates, final buy amount, confirmation time,
 and receipt fields such as block number/hash and gas used.
+
+Chainflip refreshes use the official demand-driven
+`https://chainflip-swap.chainflip.io/v2/swaps/{depositTxHash}` endpoint. Deposit
+identity, source/destination networks and assets, and destination address must
+match the stored swap. Completion requires a positive, witnessed payout with
+no egress failure; a confirmed refund is reported separately. Unknown deposits
+and provider errors preserve the prior status. Broker commissions and the
+actual fee ledger remain available in `chainflipData`. See the official
+[status schema](https://docs.chainflip.io/brokers/javascript-sdk/functions#getstatusv2).
+
+Run `bun container/live/swap-parity.ts https://oracles.cc https://api.keepkey.info`
+for a repeatable compatibility comparison using public fixtures and isolated
+API clients. It requests quotes and read RPCs without signing or broadcasting.
 
 ### UTXO
 

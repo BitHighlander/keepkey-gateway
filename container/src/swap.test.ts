@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { VersionedTransaction } from "@solana/web3.js";
-import { ProtocolQuoteAdapter, QuoteRouter, RelayQuoteAdapter, ShapeShiftQuoteAdapter, SwapError, SwapKitQuoteAdapter, ZeroXQuoteAdapter } from "./swap";
+import { ProtocolQuoteAdapter, QuoteRouter, RelayQuoteAdapter, ShapeShiftQuoteAdapter, SwapError, SwapKitQuoteAdapter, ZeroXQuoteAdapter, validateNativeEvmQuote } from "./swap";
 
 const request = {
 	sellAsset: "eip155:1/slip44:60",
@@ -79,7 +79,9 @@ describe("diverse direct swap routing", () => {
 		expect(submitted.appFees).toEqual([{ recipient: "0x87Ab2637bc4231604ad708c5e8aAC92A260c7704", fee: "30" }]);
 		expect(quote.amountOut).toBe("24.43243");
 		expect(quote.txs[0]).toMatchObject({ type: "EVM", txParams: { to: "0xb92fe925dc43a0ecde6c8b1a2709c170ec4fff4f", gasLimit: "521216" } });
-		expect(quote.raw.fees.total_bps).toBe(31);
+		expect(quote.raw.fees.total_bps).toBe(30);
+		expect(quote.raw.fees.outbound).toBe("0");
+		expect(quote.meta.feeBreakdown).toMatchObject({ integrator: { bps: 30 }, sourceNetwork: { amountBaseUnits: "24445899461264" }, priceImpactPercent: 0.31 });
 	});
 
 	test("normalizes a direct 0x v2 route with explicit integrator fees", async () => {
@@ -125,6 +127,8 @@ describe("diverse direct swap routing", () => {
 		expect(JSON.parse(String(calls[1].init?.body)).swapperName).toBe("Relay");
 		expect(quote).toMatchObject({ swapper: "Relay", amountOut: "25", quoteId: "partner-quote" });
 		expect(quote.raw.fees.total_bps).toBe(40);
+		expect(quote.raw.fees).toMatchObject({ affiliate: "0", outbound: "0" });
+		expect(quote.meta.feeBreakdown).toMatchObject({ partner: { code: "keepkey", bps: 30 }, shapeshift: { bps: 10 }, affiliateTotal: { bps: 40 } });
 	});
 
 	test("normalizes a ShapeShift Chainflip UTXO deposit-channel fallback", async () => {
@@ -239,5 +243,41 @@ describe("diverse direct swap routing", () => {
 		expect(quoteBody.affiliateFee).toBeUndefined();
 		expect(quote).toMatchObject({ swapper: "ONEINCH", amountOut: "24.6", amountOutMin: "24.3" });
 		expect(quote.raw.fees.total_bps).toBe(50);
+	});
+});
+
+
+describe("execution validation and fallback visibility", () => {
+	const executable = { amountOut: "25", swapper: "Relay", txs: [{ txParams: { to: request.recipientAddress, data: "0x12345678", value: "10000000000000000", gasLimit: "100000" } }] };
+	test("raises quoted gas to the fresh estimate and preserves higher limits", async () => {
+		let params: unknown;
+		const evm = { readRpc: async (_network: unknown, method: unknown, p: unknown) => { expect(method).toBe("eth_estimateGas"); params = p; return { success: true as const, data: "0x30d40" }; } };
+		const checked = await validateNativeEvmQuote(evm, request, executable);
+		expect(checked.txs[0].txParams.gasLimit).toBe("200000");
+		expect((params as any[])[0].gas).toBeUndefined();
+		expect((params as any[])[1]).toBe("pending");
+		expect((await validateNativeEvmQuote(evm, request, { ...executable, txs: [{ txParams: { ...executable.txs[0].txParams, gasLimit: "300000" } }] })).txs[0].txParams.gasLimit).toBe("300000");
+	});
+	test("does not pre-approval estimate ERC20 inputs and rejects invalid estimates", async () => {
+		const evm = { readRpc: async () => ({ success: true as const, data: "0x" }) };
+		expect(await validateNativeEvmQuote(evm, { ...request, sellAsset: request.buyAsset }, executable)).toBe(executable);
+		await expect(validateNativeEvmQuote(evm, request, executable)).rejects.toThrow("no valid limit");
+	});
+	test("keeps prior failure reasons when selecting a fallback and records scoped health", async () => {
+		const router = new QuoteRouter([
+			{ key: "thorchain", tier: 0, eligible: () => true, quote: async () => { throw new Error("trading is halted"); } },
+			{ key: "shapeshift", tier: 1, eligible: () => true, quote: async () => ({ ...executable, swapper: "Chainflip" }) },
+		], { now: () => 1234 });
+		const [result] = await router.quote(request);
+		expect(result.quote.meta.routeDiagnostics).toMatchObject({ fallback: true, selectedTier: 1, attempts: [{ provider: "thorchain", status: "unavailable", reason: "trading is halted" }, { provider: "shapeshift", status: "ok" }] });
+		expect(router.providerHealth()).toEqual(expect.arrayContaining([expect.objectContaining({ key: "thorchain", status: "degraded" }), expect.objectContaining({ key: "chainflip", status: "ok", checkedAt: 1234 })]));
+	});
+	test("discards an unexecutable direct quote before using the fallback", async () => {
+		const router = new QuoteRouter([
+			{ key: "relay", tier: 0, eligible: () => true, quote: async () => executable },
+			{ key: "shapeshift", tier: 1, eligible: () => true, quote: async () => ({ ...executable, swapper: "Chainflip" }) },
+		], { validateQuote: async (_request, quote) => { if (quote.swapper === "Relay")
+				throw new Error("out of gas"); return quote; } });
+		expect((await router.quote(request))[0].integration).toBe("shapeshift");
 	});
 });

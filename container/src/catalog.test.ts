@@ -43,11 +43,21 @@ describe("pinned zero-upstream catalog", () => {
 	test("reports honest demand-tested health without provider polling", () => {
 		const response = catalog.swapHealth(1234);
 		expect(response.fetchedAt).toBe(1234);
-		expect(response.integrations).toHaveLength(6);
+		expect(response.integrations).toHaveLength(7);
 		expect(response.integrations.find((integration) => integration.key === "zeroex")?.status).toBe("disabled");
 		expect(response.integrations.find((integration) => integration.key === "swapkit")?.status).toBe("disabled");
 		const configured = new Catalog({ zeroxEnabled: true, swapkitEnabled: true }).swapHealth(1234);
 		expect(configured.integrations.find((integration) => integration.key === "zeroex")?.status).toBe("unknown");
 		expect(configured.integrations.find((integration) => integration.key === "swapkit")?.status).toBe("gated");
 	});
+});
+
+
+test("quote observations expire without polling and never enable unconfigured providers", () => {
+	const catalog = new Catalog();
+	const now = 1000000;
+	const observations = [{ key: "relay", status: "ok" as const, detail: "Quote succeeded", checkedAt: now }, { key: "zeroex", status: "ok" as const, detail: "Quote succeeded", checkedAt: now }];
+	expect(catalog.swapHealth(now, observations).integrations.find(row => row.key === "relay")).toMatchObject({ status: "ok", checkedAt: now, checkScope: "quote" });
+	expect(catalog.swapHealth(now + 300001, observations).integrations.find(row => row.key === "relay")?.status).toBe("unknown");
+	expect(catalog.swapHealth(now, observations).integrations.find(row => row.key === "zeroex")?.status).toBe("disabled");
 });

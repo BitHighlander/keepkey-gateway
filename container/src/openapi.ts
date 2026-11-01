@@ -244,7 +244,7 @@ export function openApiDocument(requestUrl: string): Record<string, unknown> {
 						required: ["networkId", "method", "params"],
 						properties: {
 							networkId: { type: "string", pattern: "^eip155:[1-9][0-9]*$" },
-							method: { type: "string", enum: ["eth_call", "eth_getCode", "eth_blockNumber", "eth_simulateV1"] },
+							method: { type: "string", enum: ["eth_call", "eth_estimateGas", "eth_feeHistory", "eth_getCode", "eth_blockNumber", "eth_simulateV1", "debug_traceCall"] },
 							params: { type: "array", items: {} },
 						},
 					} } } },

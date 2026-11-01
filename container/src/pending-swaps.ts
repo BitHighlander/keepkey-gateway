@@ -57,7 +57,56 @@ export class PendingSwapService {
 		if (isShapeShift(refreshed.payload)) refreshed = await this.trackShapeShift(clientId, normalized, refreshed) || refreshed;
 		refreshed = await this.refreshMidgard(clientId, normalized, refreshed) || refreshed;
 		refreshed = await this.refreshRelay(clientId, normalized, refreshed) || refreshed;
+		refreshed = await this.refreshChainflip(clientId, normalized, refreshed) || refreshed;
 		return response(refreshed || stored);
+	}
+
+	private async refreshChainflip(clientId: string, txHash: string, stored: StoredPendingSwap): Promise<StoredPendingSwap | null> {
+		const route = `${stored.payload.integration || ""} ${stored.payload.swapper || ""}`.toLowerCase();
+		if (!route.includes("chainflip")) return stored;
+		try {
+			const body = await fetchJson(this.fetcher, `https://chainflip-swap.chainflip.io/v2/swaps/${encodeURIComponent(String(stored.payload.txHash || txHash))}`, {}, "Chainflip");
+			const sell = objectOrEmpty(stored.payload.sellAsset);
+			const buy = objectOrEmpty(stored.payload.buyAsset);
+			if (typeof body?.deposit?.txRef !== "string" || !chainflipTxMatches(body.deposit.txRef, txHash)) {
+				throw new Error("Chainflip has not identified this deposit transaction");
+			}
+			if (!chainflipNetworkMatches(body.srcChain, sell.networkId) || !chainflipNetworkMatches(body.destChain, buy.networkId)) throw new Error("Chainflip networks do not match this swap");
+			const expectedAddress = String(buy.address);
+			if (typeof body.destAddress !== "string" || (String(buy.networkId).startsWith("eip155:") ? body.destAddress.toLowerCase() !== expectedAddress.toLowerCase() : body.destAddress !== expectedAddress)) throw new Error("Chainflip destination does not match this swap");
+			if (String(body.srcAsset).toUpperCase() !== String(sell.symbol).toUpperCase() || String(body.destAsset).toUpperCase() !== String(buy.symbol).toUpperCase()) throw new Error("Chainflip assets do not match this swap");
+			const state = String(body.state || "").toUpperCase();
+			const output = body.swapEgress;
+			const refund = body.refundEgress;
+			let status = stored.status;
+			if (state === "RECEIVING") status = "confirming";
+			else if (state === "SWAPPING") status = "swapping";
+			else if (["SENDING", "SENT"].includes(state)) status = "output_confirming";
+			else if (state === "FAILED") status = confirmedChainflipEgress(refund) ? "refunded" : "failed";
+			else if (state === "COMPLETED") {
+				if (confirmedChainflipEgress(refund) && !confirmedChainflipEgress(output)) status = "refunded";
+				else if (confirmedChainflipEgress(output) && !body.fallbackEgress) status = "completed";
+				else throw new Error("Chainflip completion has no confirmed payout");
+			}
+			const destinationDecimals = chainflipDecimals(String(body.destAsset), String(body.destChain));
+			return await this.database.updatePendingSwap(clientId, txHash, status, {
+				requiredConfirmations: numberOr(body.srcChainRequiredBlockConfirmations, 0),
+				confirmations: numberOr(body.deposit.txConfirmations, body.deposit.witnessedAt ? Math.max(1, numberOr(body.srcChainRequiredBlockConfirmations, 1)) : 0),
+				...(output?.txRef ? { outboundTxHash: output.txRef, outboundTxid: output.txRef } : {}),
+				...(status === "completed" ? {
+					receivedOutputBaseUnits: output.amount, receivedOutput: destinationDecimals === undefined ? undefined : unitsToDecimal(output.amount, destinationDecimals),
+					completedAt: new Date(output.witnessedAt).toISOString(), outboundConfirmations: 1, outboundRequiredConfirmations: 1,
+				} : {}),
+				...(confirmedChainflipEgress(refund) ? { refundTxid: refund.txRef, refundReason: status === "completed" ? "Chainflip refunded part of the deposit" : "Chainflip refunded the deposit" } : {}),
+				...(status === "failed" ? { error: { provider: "chainflip", message: "Chainflip reports the swap failed" } } : {}),
+				chainflipData: { state, swapId: body.swapId, estimatedDurationSeconds: body.estimatedDurationSeconds, brokers: body.brokers, fees: body.fees, swapEgress: body.swapEgress, refundEgress: body.refundEgress, fallbackEgress: body.fallbackEgress },
+				providerCheck: { provider: "chainflip", result: state },
+			});
+		} catch (error) {
+			return await this.database.updatePendingSwap(clientId, txHash, stored.status, {
+				providerCheck: { provider: "chainflip", result: "unavailable", message: error instanceof Error ? error.message : String(error) },
+			});
+		}
 	}
 
 	/** UpdatePendingSwap. Desktop's only update is the Relay request id it
@@ -260,6 +309,28 @@ function refreshDue(stored: StoredPendingSwap, initialGraceMs: number, intervalM
 
 function isTerminal(status: string): boolean {
 	return status === "completed" || status === "failed" || status === "refunded";
+}
+
+function confirmedChainflipEgress(egress: any): boolean {
+	return typeof egress?.txRef === "string" && egress.txRef.length > 0 && /^\d+$/.test(String(egress.amount)) && BigInt(egress.amount) > 0n && typeof egress.witnessedAt === "number" && egress.witnessedAt > 0 && Number.isFinite(new Date(egress.witnessedAt).getTime()) && !egress.failure;
+}
+
+function chainflipTxMatches(left: string, right: string): boolean {
+	const hex = /^(?:0x)?[0-9a-f]+$/i;
+	return hex.test(left) && hex.test(right) ? left.toLowerCase().replace(/^0x/, "") === right.toLowerCase().replace(/^0x/, "") : left === right;
+}
+
+function chainflipDecimals(asset: string, chain: string): number | undefined {
+	if (asset.toUpperCase() === "USDT" && chain === "Bsc") return 18;
+	return ({ BTC: 8, WBTC: 8, CBBTC: 8, ETH: 18, USDC: 6, USDT: 6, SOL: 9, FLIP: 18, DOT: 10, TRX: 6, BNB: 18 } as Record<string, number>)[asset.toUpperCase()];
+}
+
+function chainflipNetworkMatches(chain: unknown, network: unknown): boolean {
+	const networks: Record<string, string> = {
+		Bitcoin: "bip122:000000000019d6689c085ae165831e93", Ethereum: "eip155:1", Arbitrum: "eip155:42161",
+		Bsc: "eip155:56", Solana: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp", Tron: "tron:0x2b6653dc",
+	};
+	return typeof chain === "string" && networks[chain] !== undefined && networks[chain] === network;
 }
 
 function relayTrackingStatus(raw: string, current: string): string {

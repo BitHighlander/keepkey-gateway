@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { PersistentCache } from "./cache";
 import type { AppConfig } from "./config";
 import type { Database } from "./database";
-import { EvmClient, formatUnits } from "./evm";
+import { EvmClient, formatUnits, normalizeReadRpcParams } from "./evm";
 import { createApp } from "./http";
 
 class TestCache implements PersistentCache {
@@ -92,7 +92,7 @@ describe("EvmReadRpc", () => {
 
 	test("refuses methods outside the read-only allowlist without calling the node", async () => {
 		const { client, requests } = fakeNode(() => ({ result: "0x" }));
-		for (const method of ["eth_sendRawTransaction", "eth_sign", "eth_accounts", "debug_traceCall", 7]) {
+		for (const method of ["eth_sendRawTransaction", "eth_sign", "eth_accounts", "debug_traceTransaction", 7]) {
 			await expect(client.readRpc("eip155:8453", method, [])).rejects.toMatchObject({ status: 400 });
 		}
 		expect(requests()).toBe(0);
@@ -256,5 +256,32 @@ describe("EVM read routes", () => {
 		expect(write.status).toBe(400);
 		const anonymous = await app.fetch(new Request(`http://gateway.test/api/v1/evm/lookup/eip155:8453/${TXID}`));
 		expect(anonymous.status).toBe(401);
+	});
+});
+
+
+describe("RPC quantity compatibility", () => {
+	test("normalizes wallet byte quantities without touching calldata or addresses", async () => {
+		const { client, calls } = fakeNode(() => ({ result: "0x5208" }));
+		await client.readRpc("eip155:8453", "eth_estimateGas", [{ to: USDC, data: "0x0000ab", gas: "0x070d60", nonce: "0x02a0", value: "0000", gasPrice: null }, "pending"]);
+		expect(calls[0].params).toEqual([{ to: USDC, data: "0x0000ab", gas: "0x70d60", nonce: "0x2a0", value: "0x0" }, "pending"]);
+	});
+	test("rejects invalid quantities and unbounded tracing before node work", async () => {
+		const { client, requests } = fakeNode(() => ({ result: "0x" }));
+		for (const gas of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1, "0xzz"])
+			await expect(client.readRpc("eip155:8453", "eth_call", [{ gas }])).rejects.toMatchObject({ status: 400 });
+		for (const options of [{}, { tracer: "prestateTracer" }, { tracer: "callTracer", timeout: "60s" }, { tracer: "callTracer", reexec: 1000 }, { tracer: "callTracer", tracerConfig: { arbitrary: true } }, { tracer: "callTracer", tracerConfig: { withLog: "yes" } }])
+			await expect(client.readRpc("eip155:8453", "debug_traceCall", [{}, "latest", options])).rejects.toMatchObject({ status: 400 });
+		expect(requests()).toBe(0);
+	});
+	test("bounds fee history and normalizes nested simulations", () => {
+		expect(normalizeReadRpcParams("eth_feeHistory", [5, "latest", [25, 50]])).toEqual(["0x5", "latest", [25, 50]]);
+		expect(() => normalizeReadRpcParams("eth_feeHistory", [101])).toThrow();
+		expect(normalizeReadRpcParams("eth_simulateV1", [{ blockStateCalls: [{ calls: [{ value: "0x0001" }] }] }])[0]).toEqual({ blockStateCalls: [{ calls: [{ value: "0x1" }] }] });
+		expect(normalizeReadRpcParams("debug_traceCall", [{}, "latest", { tracer: "callTracer" }])[2]).toEqual({ tracer: "callTracer", timeout: "5s" });
+	});
+	test("distinguishes unsupported simulation from an upstream outage", async () => {
+		const client = new EvmClient({ apiKey: "test", cache: new TestCache(), fetch: (async () => new Response("unsupported", { status: 405 })) as unknown as typeof fetch, endpoints: { "eip155:8453": "https://rpc.test" } });
+		await expect(client.readRpc("eip155:8453", "eth_simulateV1", [{ blockStateCalls: [] }, "latest"])).rejects.toMatchObject({ status: 422, message: "EVM node does not support eth_simulateV1 (HTTP 405)" });
 	});
 });
