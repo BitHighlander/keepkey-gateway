@@ -21,7 +21,8 @@ jobs:
       - run: make test
       - run: make typecheck
       - name: Stamp container revision
-        run: bun -e 'await Bun.write("container/data/build-info.json", JSON.stringify({ revision: process.env.GITHUB_SHA }))'
+        run: |
+          bun -e 'await Bun.write("container/data/build-info.json", JSON.stringify({ revision: process.env.GITHUB_SHA }))'
       - run: make deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
