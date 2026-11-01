@@ -18,9 +18,18 @@ export interface SwapHealth {
 	integrations: Array<{
 		key: string;
 		label: string;
-		status: "unknown" | "gated" | "disabled";
+		status: "ok" | "degraded" | "offline" | "unknown" | "gated" | "disabled";
 		detail: string;
+		checkedAt?: number;
+		checkScope?: "quote";
 	}>;
+}
+
+export interface SwapHealthObservation {
+	key: string;
+	status: "ok" | "degraded";
+	detail: string;
+	checkedAt: number;
 }
 
 interface CatalogOptions {
@@ -69,8 +78,8 @@ export class Catalog {
 		return supportedChainsSnapshot;
 	}
 
-	swapHealth(now = Date.now()): SwapHealth {
-		return {
+	swapHealth(now = Date.now(), observations: readonly SwapHealthObservation[] = []): SwapHealth {
+		const result: SwapHealth = {
 			fetchedAt: now,
 			integrations: [
 				{ key: "thorchain", label: "THORChain", status: "unknown", detail: "Checked on quote demand; no background polling" },
@@ -78,8 +87,24 @@ export class Catalog {
 				{ key: "relay", label: "Relay", status: "unknown", detail: "Checked on quote demand; no background polling" },
 				{ key: "zeroex", label: "0x", status: this.options.zeroxEnabled ? "unknown" : "disabled", detail: this.options.zeroxEnabled ? "API-key and app-fee route checked on quote demand" : "ZEROX_API_KEY is not configured" },
 				{ key: "shapeshift", label: "ShapeShift", status: "unknown", detail: "Partner-attributed fallback (including moving swappers such as Chainflip/NEAR); checked only on quote demand" },
+				{ key: "chainflip", label: "Chainflip", status: "gated", detail: "Available through ShapeShift; a direct KeepKey broker is not configured" },
 				{ key: "swapkit", label: "SwapKit", status: this.options.swapkitEnabled ? "gated" : "disabled", detail: this.options.swapkitEnabled ? "API-key fallback remains unavailable unless each quote proves nonzero affiliate attribution" : "SWAPKIT_API_KEY is not configured" },
 			],
 		};
+		for (const integration of result.integrations) {
+			if (integration.status === "disabled") continue;
+			const observed = observations.find(observation => observation.key === integration.key);
+			if (!observed) continue;
+			integration.checkedAt = observed.checkedAt;
+			integration.checkScope = "quote";
+			if (now - observed.checkedAt > 5 * 60_000) {
+				integration.status = "unknown";
+				integration.detail = "Last quote check is over five minutes old. Request a quote for current availability.";
+			} else {
+				integration.status = observed.status;
+				integration.detail = observed.detail;
+			}
+		}
+		return result;
 	}
 }

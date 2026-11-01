@@ -184,3 +184,45 @@ describe("PostgreSQL pending swap contract", () => {
 		}
 	});
 });
+
+
+describe("Chainflip demand-driven tracking", () => {
+	const record = { ...valid, integration: "shapeshift", swapper: "Chainflip", sellAsset: { ...valid.sellAsset, symbol: "BTC", networkId: "bip122:000000000019d6689c085ae165831e93", caip: "bip122:000000000019d6689c085ae165831e93/slip44:0" }, buyAsset: { ...valid.buyAsset, symbol: "ETH", networkId: "eip155:1", caip: "eip155:1/slip44:60" } };
+	const payout = { state: "COMPLETED", srcChain: "Bitcoin", srcAsset: "BTC", destChain: "Ethereum", destAsset: "ETH", destAddress: record.buyAsset.address, deposit: { txRef: valid.txHash, witnessedAt: 1787528001000 }, srcChainRequiredBlockConfirmations: 2, swapId: "fixture-swap", swapEgress: { txRef: "0xoutbound", amount: "1234567890123456789", witnessedAt: 1787528101000 }, brokers: [{ commissionBps: 5 }, { commissionBps: 40 }], fees: [{ type: "NETWORK", amount: "100" }] };
+	async function setup(body: unknown, httpStatus = 200) {
+		let calls = 0;
+		const service = new PendingSwapService(fakeDatabase(), { initialGraceMs: 0, refreshIntervalMs: 0, fetch: (async (url: string | URL | Request) => { calls++; expect(String(url)).toContain("chainflip-swap.chainflip.io/v2/swaps/"); return Response.json(body, { status: httpStatus }); }) as typeof fetch });
+		await service.create("fixture-client", record);
+		expect(calls).toBe(0);
+		return { service, calls: () => calls };
+	}
+	test("requires a confirmed matching payout, preserves fee ledger, and stops terminal checks", async () => {
+		const { service, calls } = await setup(payout);
+		const result = await service.get("fixture-client", valid.txHash, true);
+		expect(result).toMatchObject({ status: "completed", confirmations: 2, requiredConfirmations: 2, outboundTxid: "0xoutbound", receivedOutput: "1.234567890123456789", chainflipData: { brokers: payout.brokers, fees: payout.fees } });
+		await service.get("fixture-client", valid.txHash, true);
+		expect(calls()).toBe(1);
+	});
+	test("rejects mismatched deposits, destinations, assets, networks and unconfirmed completion", async () => {
+		for (const patch of [{ deposit: { txRef: "0xwrong" } }, { destAddress: valid.sellAsset.address }, { destAsset: "USDT" }, { destChain: "Arbitrum" }, { swapEgress: { ...payout.swapEgress, witnessedAt: undefined } }, { swapEgress: { ...payout.swapEgress, failure: { reason: "transfer failed" } } }, { fallbackEgress: { txRef: "fallback" } }]) {
+			const { service } = await setup({ ...payout, ...patch });
+			expect(await service.get("fixture-client", valid.txHash, true)).toMatchObject({ status: "pending", providerCheck: { result: "unavailable" } });
+		}
+	});
+	test("keeps unknown deposits pending and follows receiving/swapping/refunds", async () => {
+		const missing = await setup({}, 404);
+		expect(await missing.service.get("fixture-client", valid.txHash, true)).toMatchObject({ status: "pending", providerCheck: { result: "unavailable" } });
+		for (const [state, status] of [["RECEIVING", "confirming"], ["SWAPPING", "swapping"], ["SENDING", "output_confirming"]]) {
+			const { service } = await setup({ ...payout, state });
+			expect((await service.get("fixture-client", valid.txHash, true))?.status).toBe(status);
+		}
+		const refunded = await setup({ ...payout, state: "FAILED", refundEgress: { txRef: "refund-tx", amount: "10000", witnessedAt: 1787528101000 } });
+		expect(await refunded.service.get("fixture-client", valid.txHash, true)).toMatchObject({ status: "refunded", refundTxid: "refund-tx" });
+	});
+});
+test("BSC USDT output uses 18 decimals", async () => {
+	const database = fakeDatabase();
+	const service = new PendingSwapService(database, { fetch: (async () => Response.json({ state: "COMPLETED", srcChain: "Ethereum", srcAsset: "ETH", destChain: "Bsc", destAsset: "USDT", destAddress: valid.buyAsset.address, deposit: { txRef: valid.txHash }, swapEgress: { txRef: "outbound", amount: "1230000000000000000", witnessedAt: 1787528101000 } })) as unknown as typeof fetch });
+	await service.create("fixture", { ...valid, integration: "chainflip", swapper: "Chainflip", buyAsset: { ...valid.buyAsset, symbol: "USDT", networkId: "eip155:56" } });
+	expect(await service.get("fixture", valid.txHash, true)).toMatchObject({ status: "completed", receivedOutput: "1.23" });
+});

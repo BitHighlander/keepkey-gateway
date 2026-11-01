@@ -194,7 +194,7 @@ export function createApp({ database, zerion, evm, market, utxo, portfolio, hist
 
 				if (request.method === "GET" && url.pathname === "/api/v1/swap/health") {
 					if (!catalog) throw new HttpError(503, "feature_unavailable", "Asset catalog is unavailable");
-					return json(catalog.swapHealth(), 200, requestId, { "Cache-Control": "no-store" });
+					return json(catalog.swapHealth(Date.now(), quoteRouter?.providerHealth()), 200, requestId, { "Cache-Control": "no-store" });
 				}
 
 				if (request.method === "GET" && url.pathname === "/api/v1/discovery/search") {

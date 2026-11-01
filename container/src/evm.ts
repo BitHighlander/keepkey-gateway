@@ -7,7 +7,57 @@ const RPC_TIMEOUT_MS = 12_000;
 
 /** JSON-RPC methods a wallet may run on Pioneer's nodes to preview a
  * transaction. Nothing that writes, signs, or reads private node state. */
-export const READ_RPC_METHODS: ReadonlySet<string> = new Set(["eth_call", "eth_getCode", "eth_blockNumber", "eth_simulateV1"]);
+export const READ_RPC_METHODS: ReadonlySet<string> = new Set([
+	"eth_call", "eth_estimateGas", "eth_feeHistory", "eth_getCode", "eth_blockNumber", "eth_simulateV1", "debug_traceCall",
+]);
+
+const CALL_QUANTITIES = ["gas", "gasPrice", "maxFeePerGas", "maxPriorityFeePerGas", "value", "nonce", "chainId", "type"];
+
+/** hdwallet serializes bytes; JSON-RPC quantities must omit leading zeroes.
+ * Normalize only numeric fields, never addresses, calldata or storage words. */
+export function normalizeReadRpcParams(method: string, params: unknown[]): unknown[] {
+	const call = (raw: unknown): Record<string, unknown> => {
+		if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new EvmError("Invalid EVM call object", 400);
+		const normalized = { ...raw } as Record<string, unknown>;
+		for (const field of CALL_QUANTITIES) {
+			const value = normalized[field];
+			if (value == null || value === "") { delete normalized[field]; continue; }
+			if ((typeof value !== "string" && typeof value !== "number") || !/^(?:0x[0-9a-f]+|\d+)$/i.test(String(value))) throw new EvmError(`Invalid EVM call ${field}`, 400);
+			if (typeof value === "number" && !Number.isSafeInteger(value)) throw new EvmError(`Invalid EVM call ${field}`, 400);
+			normalized[field] = `0x${BigInt(value).toString(16)}`;
+		}
+		return normalized;
+	};
+	const result = [...params];
+	if (["eth_call", "eth_estimateGas", "debug_traceCall"].includes(method)) result[0] = call(result[0]);
+	if (method === "debug_traceCall") {
+		const options = result[2] as Record<string, unknown> | undefined;
+		if (!options || options.tracer !== "callTracer" || Object.keys(options).some(key => !["tracer", "tracerConfig", "timeout"].includes(key))) {
+			throw new EvmError("Only the read-only callTracer is supported", 400);
+		}
+		const config = options.tracerConfig;
+		if (config !== undefined && (!config || typeof config !== "object" || Array.isArray(config) || Object.entries(config).some(([key, value]) => !["onlyTopCall", "withLog"].includes(key) || typeof value !== "boolean"))) {
+			throw new EvmError("Invalid callTracer configuration", 400);
+		}
+		const timeout = String(options.timeout || "5s");
+		if (!/^[1-5]s$/.test(timeout)) throw new EvmError("Trace timeout must be between 1s and 5s", 400);
+		result[2] = { ...options, timeout };
+	}
+	if (method === "eth_feeHistory") {
+		const count = String(result[0] ?? "");
+		if (!/^(?:0x[0-9a-f]+|\d+)$/i.test(count) || BigInt(count) < 1n || BigInt(count) > 100n) throw new EvmError("Fee history must request 1..100 blocks", 400);
+		result[0] = `0x${BigInt(count).toString(16)}`;
+	}
+	if (method === "eth_simulateV1") {
+		const options = result[0] as Record<string, any> | undefined;
+		if (!options || !Array.isArray(options.blockStateCalls)) throw new EvmError("Invalid simulation blocks", 400);
+		result[0] = { ...options, blockStateCalls: options.blockStateCalls.map((block: any) => {
+			if (!block || typeof block !== "object" || !Array.isArray(block.calls)) throw new EvmError("Invalid simulation calls", 400);
+			return { ...block, calls: block.calls.map(call) };
+		}) };
+	}
+	return result;
+}
 
 const RPC_ENDPOINTS: Readonly<Record<string, string>> = {
 	"eip155:1": "https://eth.nownodes.io/",
@@ -172,9 +222,10 @@ export class EvmClient {
 		if (typeof networkId !== "string" || !/^eip155:[1-9]\d*$/.test(networkId)) throw new EvmError(`Invalid EVM network: ${String(networkId)}`, 400);
 		if (typeof method !== "string" || !READ_RPC_METHODS.has(method)) throw new EvmError(`Method not allowed: ${String(method)}`, 400);
 		if (!Array.isArray(params)) throw new EvmError("params must be an array", 400);
+		const normalized = normalizeReadRpcParams(method, params);
 		// Results depend on the current block, so concurrent identical calls share
 		// one upstream request and nothing is kept after it settles.
-		const data = await this.singleflight(`rpc:${networkId}:${method}:${JSON.stringify(params)}`, () => this.nodeCall(networkId, method, params));
+		const data = await this.singleflight(`rpc:${networkId}:${method}:${JSON.stringify(normalized)}`, () => this.nodeCall(networkId, method, normalized));
 		return { success: true, data };
 	}
 
@@ -280,7 +331,10 @@ export class EvmClient {
 		} catch (error) {
 			throw new EvmError(`EVM node request failed: ${error instanceof Error ? error.message : String(error)}`);
 		}
-		if (!response.ok) throw new EvmError(`EVM node request failed (${response.status})`);
+		if (!response.ok) {
+			if (response.status === 405) throw new EvmError(`EVM node does not support ${method} (HTTP 405)`, 422);
+			throw new EvmError(`EVM node request failed (${response.status})`);
+		}
 
 		const body = await response.json() as JsonRpcResponse | JsonRpcResponse[];
 		const responses = Array.isArray(body) ? body : [body];

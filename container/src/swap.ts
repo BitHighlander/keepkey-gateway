@@ -2,6 +2,8 @@ import assetData from "../data/assets.json";
 import chainData from "../data/chains.json";
 import swapAssetsSnapshot from "../data/swap-assets.json";
 import supportedChainsSnapshot from "../data/swap-supported-chains.json";
+import type { EvmClient } from "./evm";
+import type { SwapHealthObservation } from "./catalog";
 import {
 	AddressLookupTableAccount,
 	AddressLookupTableProgram,
@@ -218,8 +220,10 @@ export class RelayQuoteAdapter implements QuoteAdapter {
 			...raw,
 			fees: {
 				...(raw.fees || {}),
-				total_bps: Number.isFinite(totalImpactPercent) ? Math.ceil(totalImpactPercent * 100) : RELAY_APP_FEE_BPS,
-				outbound: String(raw.fees?.gas?.amount || "0"),
+				total_bps: RELAY_APP_FEE_BPS,
+				// Relay's gas amount is source-native base units, never destination
+				// token units. The wallet reserves source gas separately.
+				outbound: "0",
 				affiliate: String(raw.fees?.app?.amount || "0"),
 			},
 			total_swap_seconds: Number(raw.details?.timeEstimate || 0),
@@ -232,6 +236,11 @@ export class RelayQuoteAdapter implements QuoteAdapter {
 			amountOut: unitsToDecimal(outUnits, outputDecimals),
 			amountOutMin: unitsToDecimal(minimumUnits, outputDecimals),
 			buyAmount: unitsToDecimal(outUnits, outputDecimals),
+			meta: { quoteMode: "RELAY_DIRECT", originChainId, destinationChainId, feeBreakdown: {
+				integrator: { bps: RELAY_APP_FEE_BPS, recipient: RELAY_APP_FEE_RECIPIENT },
+				sourceNetwork: { amountBaseUnits: String(raw.fees?.gas?.amount || "0"), asset: CHAINS[networkId(request.sellAsset)]?.nativeAssetCaip },
+				...(Number.isFinite(totalImpactPercent) ? { priceImpactPercent: totalImpactPercent } : {}),
+			} },
 			txs: [{
 				type: "EVM",
 				chain: networkId(request.sellAsset),
@@ -251,7 +260,6 @@ export class RelayQuoteAdapter implements QuoteAdapter {
 			complete: true,
 			steps: 1,
 			relayRequestId: raw.requestId,
-			meta: { quoteMode: "RELAY_DIRECT", originChainId, destinationChainId },
 			raw: normalizedRaw,
 		};
 	}
@@ -553,7 +561,8 @@ export class ShapeShiftQuoteAdapter implements QuoteAdapter {
 async function normalizeShapeShiftQuote(raw: any, rate: any, request: QuoteRequest, buy: AssetRecord, fetcher: typeof fetch, nownodesApiKey?: string): Promise<Record<string, any>> {
 	const partnerBps = Number(raw.partnerBps ?? rate.partnerBps ?? 0);
 	const affiliateBps = Number(raw.affiliateBps ?? rate.affiliateBps ?? 0);
-	if (!Number.isFinite(partnerBps) || partnerBps <= 0 || !Number.isFinite(affiliateBps) || affiliateBps < partnerBps) {
+	const shapeshiftBps = Number(raw.shapeshiftBps ?? rate.shapeshiftBps ?? affiliateBps - partnerBps);
+	if (!Number.isInteger(partnerBps) || partnerBps <= 0 || !Number.isInteger(affiliateBps) || affiliateBps > 10_000 || affiliateBps < partnerBps || !Number.isInteger(shapeshiftBps) || shapeshiftBps < 0 || partnerBps + shapeshiftBps !== affiliateBps) {
 		throw new SwapError("ShapeShift partner fee attribution is missing", 422);
 	}
 	const step = (raw.steps || []).find((candidate: any) => candidate?.transactionData);
@@ -608,7 +617,7 @@ async function normalizeShapeShiftQuote(raw: any, rate: any, request: QuoteReque
 	const minimum = (BigInt(outUnits) * BigInt(Math.floor((100 - Number(request.slippage ?? 3)) * 100)) / 10_000n).toString();
 	const normalizedRaw = {
 		...raw,
-		fees: { total_bps: affiliateBps, affiliate: String(partnerBps), outbound: String(raw.networkFeeCryptoBaseUnit || rate.networkFeeCryptoBaseUnit || "0") },
+		fees: { total_bps: affiliateBps, affiliate: "0", outbound: "0" },
 		total_swap_seconds: Math.ceil(Number(step?.estimatedExecutionTimeMs || rate.estimatedExecutionTimeMs || 0) / 1000),
 	};
 	const swapper = raw.swapperName || rate.swapperName;
@@ -618,7 +627,14 @@ async function normalizeShapeShiftQuote(raw: any, rate: any, request: QuoteReque
 		amountOut: unitsToDecimal(outUnits, outputDecimals), amountOutMin: unitsToDecimal(minimum, outputDecimals), buyAmount: unitsToDecimal(outUnits, outputDecimals),
 		inbound_address: inboundAddress || undefined, expiry: raw.expiresAt ? Math.floor(Number(raw.expiresAt) / 1000) : undefined,
 		txs: [{ type, chain: networkId(request.sellAsset), txParams }], complete: true, steps: 1,
-		meta: { quoteMode: "SHAPESHIFT_FALLBACK", quoteId: raw.quoteId, swapper, ...(depositAddress ? { depositAddress } : {}) }, raw: normalizedRaw,
+		meta: { quoteMode: "SHAPESHIFT_FALLBACK", quoteId: raw.quoteId, swapper, ...(depositAddress ? { depositAddress } : {}), feeBreakdown: {
+			partner: { code: SHAPESHIFT_PARTNER_CODE, bps: partnerBps },
+			shapeshift: { bps: shapeshiftBps },
+			affiliateTotal: { bps: affiliateBps },
+			// Provider-reported network fee remains explicit, in its original units;
+			// never format it as the destination token's amount.
+			providerNetwork: { amountBaseUnits: String(raw.networkFeeCryptoBaseUnit || rate.networkFeeCryptoBaseUnit || "0") },
+		} }, raw: normalizedRaw,
 	};
 }
 
@@ -812,8 +828,14 @@ export class ProtocolQuoteAdapter implements QuoteAdapter {
 
 export class QuoteRouter {
 	private readonly inFlight = new Map<string, Promise<any[]>>();
+	private readonly observations = new Map<string, SwapHealthObservation>();
 
-	constructor(private readonly adapters: readonly QuoteAdapter[]) {}
+	constructor(private readonly adapters: readonly QuoteAdapter[], private readonly options: {
+		validateQuote?: (request: QuoteRequest, quote: Record<string, any>) => Promise<Record<string, any>>;
+		now?: () => number;
+	} = {}) {}
+
+	providerHealth(): SwapHealthObservation[] { return [...this.observations.values()]; }
 
 	async quote(request: QuoteRequest): Promise<any[]> {
 		validateQuoteRequest(request);
@@ -830,19 +852,38 @@ export class QuoteRouter {
 	private async run(adapters: readonly QuoteAdapter[], request: QuoteRequest): Promise<any[]> {
 		const invocationId = crypto.randomUUID();
 		const reasons: string[] = [];
+		const attempts: Array<{ provider: string; status: "ok" | "unavailable"; reason?: string; checkedAt: number }> = [];
 		const tiers = [...new Set(adapters.map((adapter) => adapter.tier || 0))].sort((left, right) => left - right);
 		for (const tier of tiers) {
 			const tierAdapters = adapters.filter((adapter) => (adapter.tier || 0) === tier);
-			const settled = await Promise.allSettled(tierAdapters.map(async (adapter) => ({
-				integration: adapter.key,
-				quote: await adapter.quote(request),
-				invocationId,
-			})));
+			const settled = await Promise.allSettled(tierAdapters.map(async (adapter) => {
+				try {
+					let quote = await adapter.quote(request);
+					if (this.options.validateQuote) quote = await this.options.validateQuote(request, quote);
+					const checkedAt = (this.options.now || Date.now)();
+					attempts.push({ provider: adapter.key, status: "ok", checkedAt });
+					this.observations.set(adapter.key, { key: adapter.key, status: "ok", checkedAt, detail: "Last demand-driven quote check succeeded. Availability depends on the pair and amount." });
+					if (String(quote.swapper).toLowerCase() === "chainflip") this.observations.set("chainflip", {
+						key: "chainflip", status: "ok", checkedAt, detail: "Last Chainflip quote succeeded through ShapeShift; direct KeepKey broker routing is not configured.",
+					});
+					return { integration: adapter.key, quote, invocationId };
+				} catch (error) {
+					const reason = error instanceof Error ? error.message : String(error);
+					const checkedAt = (this.options.now || Date.now)();
+					attempts.push({ provider: adapter.key, status: "unavailable", reason, checkedAt });
+					// A failed pair/amount is not proof of an outage at the provider.
+					this.observations.set(adapter.key, { key: adapter.key, status: "degraded", checkedAt, detail: "Last quote request was unavailable for its pair and amount. Request a quote for current availability and route-specific details." });
+					throw error;
+				}
+			}));
 			const quotes = settled.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
 			reasons.push(...settled.flatMap((result) => result.status === "rejected" ? [result.reason instanceof Error ? result.reason.message : String(result.reason)] : []));
 			if (quotes.length > 0) {
 				quotes.sort((left, right) => Number(right.quote.amountOut) - Number(left.quote.amountOut));
-				return quotes.map((entry) => ({ ...entry, quote: { ...entry.quote, invocationId } }));
+				return quotes.map((entry) => ({ ...entry, quote: {
+					...entry.quote, invocationId,
+					meta: { ...entry.quote.meta, routeDiagnostics: { selectedTier: tier, fallback: tier > 0, attempts: [...attempts] } },
+				} }));
 			}
 		}
 		throw new SwapError(`Swap unavailable: ${reasons.join(" | ")}`, 503);
@@ -863,7 +904,7 @@ function validateQuoteRequest(request: QuoteRequest): void {
 	}
 }
 
-export function createQuoteRouter(options: { fetch?: typeof fetch; zeroxApiKey?: string; swapkitApiKey?: string; nownodesApiKey?: string } = {}): QuoteRouter {
+export function createQuoteRouter(options: { fetch?: typeof fetch; zeroxApiKey?: string; swapkitApiKey?: string; nownodesApiKey?: string; evm?: Pick<EvmClient, "readRpc"> } = {}): QuoteRouter {
 	const fetcher = options.fetch || fetch;
 	const adapters: QuoteAdapter[] = [
 		new ProtocolQuoteAdapter("thorchain", fetcher),
@@ -873,7 +914,28 @@ export function createQuoteRouter(options: { fetch?: typeof fetch; zeroxApiKey?:
 	];
 	if (options.zeroxApiKey) adapters.push(new ZeroXQuoteAdapter(options.zeroxApiKey, fetcher));
 	if (options.swapkitApiKey) adapters.push(new SwapKitQuoteAdapter(options.swapkitApiKey, fetcher));
-	return new QuoteRouter(adapters);
+	return new QuoteRouter(adapters, options.evm ? { validateQuote: (request, quote) => validateNativeEvmQuote(options.evm!, request, quote) } : {});
+}
+
+/** Check native-input contract routes before offering them; ERC-20 routes may
+ * still require an approval, so their final execution check belongs after it. */
+export async function validateNativeEvmQuote(evm: Pick<EvmClient, "readRpc">, request: QuoteRequest, quote: Record<string, any>): Promise<Record<string, any>> {
+	if (!/^eip155:\d+\/slip44:\d+$/.test(request.sellAsset)) return quote;
+	const tx = quote.txs?.[0]?.txParams;
+	if (!tx?.to || typeof tx.data !== "string" || tx.data.length < 10) return quote;
+	const network = networkId(request.sellAsset);
+	let estimate: unknown;
+	try {
+		estimate = (await evm.readRpc(network, "eth_estimateGas", [{ from: request.senderAddress, to: tx.to, data: tx.data, value: `0x${BigInt(tx.value || "0").toString(16)}` }, "pending"])).data;
+	} catch (error) {
+		throw new SwapError(`Source-chain execution check failed: ${error instanceof Error ? error.message : String(error)}`, 422);
+	}
+	if (typeof estimate !== "string" || !/^0x[0-9a-f]+$/i.test(estimate) || BigInt(estimate) <= 0n) throw new SwapError("Source-chain gas estimation returned no valid limit", 422);
+	const quoted = /^(?:\d+|0x[0-9a-f]+)$/i.test(String(tx.gasLimit || "")) ? BigInt(tx.gasLimit) : 0n;
+	const gas = BigInt(estimate) > quoted ? BigInt(estimate) : quoted;
+	return { ...quote, txs: [{ ...quote.txs[0], txParams: { ...tx, gasLimit: gas.toString() } }, ...quote.txs.slice(1)], meta: {
+		...quote.meta, executionCheck: { status: "estimated", checkedAt: Date.now(), gasEstimate: BigInt(estimate).toString(), quotedGasLimit: quoted.toString() },
+	} };
 }
 
 export function createProtocolQuoteRouter(fetcher: typeof fetch = fetch): QuoteRouter {

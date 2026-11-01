@@ -30,10 +30,11 @@ EVM reads across seven networks.
 
 ## Status
 
-Local alpha. The market/EVM/Zerion slice passes deterministic tests, live
-provider tests, and an exact generated-client probe using Vault's installed
-`@pioneer-platform/pioneer-client`. UTXO and portfolio operations remain before
-a complete Vault session can move to v5.
+Hosted at `https://oracles.cc`. The runtime includes market, EVM, UTXO,
+portfolio/DeFi, direct and fallback swap routing, pending swaps, and Vault
+streaming compatibility. Migration parity is checked against the
+[Vault contract](./docs/VAULT-PIONEER-CONTRACT.md); live provider availability
+still depends on networks, trading pairs, amounts and configured API keys.
 
 ## Plan
 

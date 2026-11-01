@@ -56,7 +56,7 @@ const solana = config.nownodesApiKey
 	? new SolanaClient({ apiKey: config.nownodesApiKey })
 	: undefined;
 const catalog = new Catalog({ zeroxEnabled: Boolean(config.zeroxApiKey), swapkitEnabled: Boolean(config.swapkitApiKey) });
-const quoteRouter = createQuoteRouter({ zeroxApiKey: config.zeroxApiKey, swapkitApiKey: config.swapkitApiKey, nownodesApiKey: config.nownodesApiKey });
+const quoteRouter = createQuoteRouter({ zeroxApiKey: config.zeroxApiKey, swapkitApiKey: config.swapkitApiKey, nownodesApiKey: config.nownodesApiKey, evm });
 const pendingSwaps = new PendingSwapService(database);
 const cosmosFeatures = new CosmosFeatures(database);
 const telemetry = new VaultTelemetry(database);
