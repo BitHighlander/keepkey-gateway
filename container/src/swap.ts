@@ -223,14 +223,15 @@ export class RelayQuoteAdapter implements QuoteAdapter {
 		const raw = await response.json().catch(() => null) as any;
 		if (!response.ok) throw new SwapError(`Relay quote failed (${response.status}): ${raw?.message || raw?.error || "unknown error"}`, response.status === 400 ? 422 : 502);
 
-		const transactionItem = (raw.steps || [])
+		const transactionItems = (raw.steps || [])
 			.filter((step: any) => !["approve", "approval"].includes(String(step.id || step.kind).toLowerCase()))
 			.flatMap((step: any) => step.items || [step])
-			.find((item: any) => {
+			.filter((item: any) => {
 				const data = item.data || item;
 				return typeof data.to === "string" && typeof data.data === "string";
 			});
-		const txData = transactionItem?.data || transactionItem;
+		if (request.relayExecutionMode === "solver-deposit" && transactionItems.length !== 1) throw new SwapError("Relay returned an unexpected solver transaction count");
+		const txData = transactionItems[0]?.data || transactionItems[0];
 		if (!txData?.to || !txData?.data || txData.data.length < 10) throw new SwapError("Relay returned no executable EVM transaction");
 		if (request.relayExecutionMode === "solver-deposit") validateRelaySolverDeposit(request, txData, amount);
 

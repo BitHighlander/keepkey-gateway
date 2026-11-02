@@ -247,11 +247,13 @@ export class PendingSwapService {
 			const statusBody = await fetchJson(this.fetcher, `https://api.relay.link/intents/status/v3?requestId=${encodeURIComponent(requestId)}`);
 			if (statusBody && typeof statusBody === "object") directStatus = statusBody;
 			const relayStatus = String(directStatus?.status || "unknown").toLowerCase();
-			const nextStatus = relayTrackingStatus(relayStatus, stored.status);
+			let nextStatus = relayTrackingStatus(relayStatus, stored.status);
 			const inTxHashes = stringArray(directStatus?.inTxHashes || (directStatus as any)?.data?.inTxs?.map((item: any) => item?.hash));
 			const outTxHashes = stringArray(directStatus?.txHashes || (directStatus as any)?.data?.outTxs?.map((item: any) => item?.hash));
 			const sameChain = directStatus?.originChainId != null && directStatus?.originChainId === directStatus?.destinationChainId;
-			const outboundTxHash = outTxHashes[0] || (nextStatus === "completed" && sameChain ? inTxHashes[0] || String(stored.payload.txHash || txHash) : undefined);
+			const solverDeposit = existingRelay.executionMode === "solver-deposit";
+			const outboundTxHash = outTxHashes[0] || (nextStatus === "completed" && sameChain && !solverDeposit ? inTxHashes[0] || String(stored.payload.txHash || txHash) : undefined);
+			if (nextStatus === "completed" && solverDeposit && !outboundTxHash) nextStatus = "output_confirming";
 			const terminal = isTerminal(nextStatus);
 			return await this.database.updatePendingSwap(clientId, txHash, nextStatus, {
 				relayData: { ...existingRelay, requestId, relayStatus, inTxHashes, outTxHashes },

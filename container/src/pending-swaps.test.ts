@@ -75,6 +75,17 @@ describe("PostgreSQL pending swap contract", () => {
 		expect(service.create("client-a", { ...valid, buyAsset: {} })).rejects.toBeInstanceOf(PendingSwapError);
 	});
 
+	test("waits for a separate solver payout even for a same-chain success", async () => {
+		let hashes: string[] = [];
+		const service = new PendingSwapService(fakeDatabase(), { initialGraceMs: 0, refreshIntervalMs: 0,
+			fetch: (async () => Response.json({ status: "success", inTxHashes: [valid.txHash], txHashes: hashes, originChainId: 1, destinationChainId: 1 })) as unknown as typeof fetch });
+		await service.create("fixture", { ...valid, relayData: { requestId: "relay-request", executionMode: "solver-deposit" } });
+		const pending = await service.get("fixture", valid.txHash, true);
+		expect(pending?.status).toBe("output_confirming"); expect(pending?.outboundTxid).toBeUndefined();
+		hashes = ["0xpayout"];
+		expect(await service.get("fixture", valid.txHash, true)).toMatchObject({ status: "completed", outboundTxid: "0xpayout" });
+	});
+
 	test("refreshes Relay only on read demand and stops forever at terminal state", async () => {
 		const database = fakeDatabase();
 		let calls = 0;
