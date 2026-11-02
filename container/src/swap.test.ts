@@ -77,6 +77,8 @@ describe("diverse direct swap routing", () => {
 		};
 		const quote = await new RelayQuoteAdapter(relayFetch as typeof fetch).quote(request);
 		expect(submitted.appFees).toEqual([{ recipient: "0x87Ab2637bc4231604ad708c5e8aAC92A260c7704", fee: "30" }]);
+		expect(submitted.slippageTolerance).toBe("100");
+		expect(submitted.refundTo).toBe(request.senderAddress);
 		expect(quote.amountOut).toBe("24.43243");
 		expect(quote.txs[0]).toMatchObject({ type: "EVM", txParams: { to: "0xb92fe925dc43a0ecde6c8b1a2709c170ec4fff4f", gasLimit: "521216" } });
 		expect(quote.raw.fees.total_bps).toBe(30);
@@ -93,8 +95,10 @@ describe("diverse direct swap routing", () => {
 				return Response.json({ steps: [{ items: [{ data: { to: "0x4cd00e387622c35bddb9b4c962c136462338bc31", data, value: "10000000000000000", chainId: 1 } }] }],
 					details: { currencyOut: { amount: "1000000", currency: { decimals: 6 } } } });
 			};
-			const quote = await new RelayQuoteAdapter(fetcher as typeof fetch).quote({ ...request, buyAsset, relayExecutionMode: "solver-deposit" });
+			const recipientAddress = "0x2222222222222222222222222222222222222222";
+			const quote = await new RelayQuoteAdapter(fetcher as typeof fetch).quote({ ...request, buyAsset, recipientAddress, slippage: 0.5, relayExecutionMode: "solver-deposit" });
 			expect(submitted).toMatchObject({ forceSolverExecution: true, explicitDeposit: true });
+			expect(submitted).toMatchObject({ slippageTolerance: "50", refundTo: request.senderAddress, recipient: recipientAddress });
 			expect(quote.meta.executionMode).toBe("solver-deposit");
 			expect(quote.txs[0].txParams.data).toBe(data);
 		}
