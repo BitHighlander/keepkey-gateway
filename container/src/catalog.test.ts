@@ -43,7 +43,7 @@ describe("pinned zero-upstream catalog", () => {
 	test("reports honest demand-tested health without provider polling", () => {
 		const response = catalog.swapHealth(1234);
 		expect(response.fetchedAt).toBe(1234);
-		expect(response.integrations).toHaveLength(7);
+		expect(response.integrations).toHaveLength(8);
 		expect(response.integrations.find((integration) => integration.key === "zeroex")?.status).toBe("disabled");
 		expect(response.integrations.find((integration) => integration.key === "swapkit")?.status).toBe("disabled");
 		const configured = new Catalog({ zeroxEnabled: true, swapkitEnabled: true }).swapHealth(1234);

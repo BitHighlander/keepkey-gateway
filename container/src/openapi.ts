@@ -87,6 +87,7 @@ export function openApiDocument(requestUrl: string): Record<string, unknown> {
 						properties: {
 							sellAsset: { type: "string" }, sellAmount: { type: "string" }, buyAsset: { type: "string" },
 							recipientAddress: { type: "string" }, senderAddress: { type: "string" }, slippage: { type: "number" }, memoless: { type: "boolean" },
+							relayExecutionMode: { type: "string", enum: ["solver-deposit"], description: "Request a simple Relay solver deposit instead of a self-executed swap. Wallet must verify device review support independently." },
 						},
 					} } } },
 					responses: providerResponses("Independent executable swap quotes, best first"),

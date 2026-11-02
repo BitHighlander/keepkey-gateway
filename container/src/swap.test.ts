@@ -84,6 +84,42 @@ describe("diverse direct swap routing", () => {
 		expect(quote.meta.feeBreakdown).toMatchObject({ integrator: { bps: 30 }, sourceNetwork: { amountBaseUnits: "24445899461264" }, priceImpactPercent: 0.31 });
 	});
 
+	test("requests and validates a solver deposit for same-chain and cross-chain routes", async () => {
+		for (const buyAsset of [request.buyAsset, "eip155:8453/slip44:60"]) {
+			let submitted: any;
+			const data = `0x49290c1c${"0".repeat(64)}${"a".repeat(64)}`;
+			const fetcher = async (_url: any, init?: RequestInit) => {
+				submitted = JSON.parse(String(init?.body));
+				return Response.json({ steps: [{ items: [{ data: { to: "0x4cd00e387622c35bddb9b4c962c136462338bc31", data, value: "10000000000000000", chainId: 1 } }] }],
+					details: { currencyOut: { amount: "1000000", currency: { decimals: 6 } } } });
+			};
+			const quote = await new RelayQuoteAdapter(fetcher as typeof fetch).quote({ ...request, buyAsset, relayExecutionMode: "solver-deposit" });
+			expect(submitted).toMatchObject({ forceSolverExecution: true, explicitDeposit: true });
+			expect(quote.meta.executionMode).toBe("solver-deposit");
+			expect(quote.txs[0].txParams.data).toBe(data);
+		}
+	});
+
+	test("rejects unexpected solver transactions instead of quietly returning a multicall", async () => {
+		const data = `0x49290c1c${"0".repeat(64)}${"a".repeat(64)}`;
+		const valid = { to: "0x4cd00e387622c35bddb9b4c962c136462338bc31", data, value: "10000000000000000", chainId: 1 };
+		for (const override of [{ to: request.senderAddress }, { data: "0xcd6e13f7" }, { data: `${data}00` }, { value: "1" }, { chainId: 8453 },
+			{ data: `0x49290c1c${"f".repeat(64)}${"a".repeat(64)}` }, { data: `0x49290c1c${"0".repeat(128)}` }]) {
+			const fetcher = async () => Response.json({ steps: [{ items: [{ data: { ...valid, ...override } }] }], details: { currencyOut: { amount: "1000000", currency: { decimals: 6 } } } });
+			await expect(new RelayQuoteAdapter(fetcher as unknown as typeof fetch).quote({ ...request, relayExecutionMode: "solver-deposit" })).rejects.toThrow("requested solver deposit");
+		}
+	});
+
+	test("binds an ERC-20 solver deposit to the requested token and exact amount", async () => {
+		const word = (hex: string) => hex.replace(/^0x/, "").padStart(64, "0");
+		const data = `0xe8017952${word(request.senderAddress)}${word(request.buyAsset.split('erc20:')[1])}${word((10000).toString(16))}${"a".repeat(64)}`;
+		const fetcher = async () => Response.json({ steps: [{ items: [{ data: { to: "0x4cd00e387622c35bddb9b4c962c136462338bc31", data, value: "0", chainId: 1 } }] }], details: { currencyOut: { amount: "1000000000000", currency: { decimals: 18 } } } });
+		const adapter = new RelayQuoteAdapter(fetcher as unknown as typeof fetch);
+		const input = { ...request, sellAsset: request.buyAsset, buyAsset: request.sellAsset, relayExecutionMode: "solver-deposit" as const };
+		expect((await adapter.quote(input)).meta.executionMode).toBe("solver-deposit");
+		await expect(adapter.quote({ ...input, sellAmount: "0.02" })).rejects.toThrow("requested solver deposit");
+	});
+
 	test("normalizes a direct 0x v2 route with explicit integrator fees", async () => {
 		let requestedUrl = "";
 		let requestedHeaders: HeadersInit | undefined;

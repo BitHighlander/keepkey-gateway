@@ -1,4 +1,6 @@
 import type { Database, StoredPendingSwap } from "./database";
+import type { EvmClient } from "./evm";
+import { UNISWAP_EXECUTE, UNISWAP_ROUTER, UNISWAP_OUTPUTS } from "./uniswap";
 
 export class PendingSwapError extends Error {
 	constructor(public readonly status: number, message: string) {
@@ -33,7 +35,7 @@ export class PendingSwapService {
 	private readonly refreshIntervalMs: number;
 	private readonly initialGraceMs: number;
 
-	constructor(private readonly database: Database, options: { fetch?: typeof fetch; refreshIntervalMs?: number; initialGraceMs?: number } = {}) {
+	constructor(private readonly database: Database, private readonly options: { fetch?: typeof fetch; refreshIntervalMs?: number; initialGraceMs?: number; evm?: Pick<EvmClient, "lookupTransaction" | "readRpc"> } = {}) {
 		this.fetcher = options.fetch || fetch;
 		this.refreshIntervalMs = options.refreshIntervalMs ?? 8_000;
 		this.initialGraceMs = options.initialGraceMs ?? 5_000;
@@ -58,7 +60,51 @@ export class PendingSwapService {
 		refreshed = await this.refreshMidgard(clientId, normalized, refreshed) || refreshed;
 		refreshed = await this.refreshRelay(clientId, normalized, refreshed) || refreshed;
 		refreshed = await this.refreshChainflip(clientId, normalized, refreshed) || refreshed;
+		refreshed = await this.refreshUniswap(clientId, normalized, refreshed) || refreshed;
 		return response(refreshed || stored);
+	}
+
+	/** A direct atomic swap is complete only after the source receipt contains
+	 * the requested output transfer. Never use the quote as the received amount. */
+	private async refreshUniswap(clientId: string, txHash: string, stored: StoredPendingSwap): Promise<StoredPendingSwap | null> {
+		if (stored.payload.integration !== "uniswap" || !this.options.evm) return stored;
+		try {
+			const sell = objectOrEmpty(stored.payload.sellAsset), buy = objectOrEmpty(stored.payload.buyAsset);
+			const token = String(buy.caip).toLowerCase().split("eip155:1/erc20:")[1];
+			if (sell.caip !== "eip155:1/slip44:60" || buy.networkId !== "eip155:1" || !UNISWAP_OUTPUTS.has(token)) throw new Error("Unsupported direct Uniswap pair");
+			const { data } = await this.options.evm.lookupTransaction("eip155:1", txHash);
+			const tx = data.tx as any, receipt = data.receipt as any;
+			if (!tx || !receipt) return stored;
+			if (String(tx.hash).toLowerCase() !== txHash || String(receipt.transactionHash).toLowerCase() !== txHash
+				|| String(tx.from).toLowerCase() !== String(sell.address).toLowerCase()
+				|| String(tx.to).toLowerCase() !== UNISWAP_ROUTER || String(receipt.to).toLowerCase() !== UNISWAP_ROUTER
+				|| BigInt(tx.value) !== BigInt(String(sell.amountBaseUnits))) throw new Error("Uniswap transaction does not match the deposit");
+			const [commands, inputs] = UNISWAP_EXECUTE.decodeFunctionData("execute", tx.input);
+			if (commands !== "0x0b000604" || inputs.length !== 4) throw new Error("Unexpected direct Uniswap route");
+			// SWEEP encodes both the actual recipient and the enforced net minimum.
+			const sweep = String(inputs[3]).replace(/^0x/, "");
+			if (!/^[0-9a-f]{192}$/i.test(sweep) || `0x${sweep.slice(24, 64)}`.toLowerCase() !== token
+				|| `0x${sweep.slice(88, 128)}`.toLowerCase() !== String(buy.address).toLowerCase()) throw new Error("Uniswap payout recipient does not match");
+			if (BigInt(receipt.status) === 0n) return await this.database.updatePendingSwap(clientId, txHash, "failed", { error: "Uniswap transaction reverted", failedAt: new Date().toISOString() });
+			if (BigInt(receipt.status) !== 1n) throw new Error("Unknown Uniswap receipt status");
+			const recipientTopic = String(buy.address).slice(2).toLowerCase().padStart(64, "0");
+			const transferTopic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+			const received = (receipt.logs || []).filter((log: any) => !log.removed && String(log.address).toLowerCase() === token
+				&& log.topics?.length === 3 && String(log.topics[0]).toLowerCase() === transferTopic
+				&& String(log.topics[2]).toLowerCase() === `0x${recipientTopic}`)
+				.reduce((sum: bigint, log: any) => sum + BigInt(log.data), 0n) as bigint;
+			if (received <= 0n || received < BigInt(`0x${sweep.slice(128)}`)) throw new Error("Uniswap receipt has no matching minimum payout");
+			const head = BigInt(String((await this.options.evm.readRpc("eip155:1", "eth_blockNumber", [])).data));
+			const confirmations = Number(head - BigInt(receipt.blockNumber) + 1n);
+			if (confirmations < 1) throw new Error("Uniswap receipt is ahead of the current chain");
+			return await this.database.updatePendingSwap(clientId, txHash, confirmations >= 2 ? "completed" : "output_confirming", {
+				confirmations, requiredConfirmations: 2, outboundConfirmations: confirmations, outboundRequiredConfirmations: 2,
+				outboundTxid: txHash, outboundTxHash: txHash, receivedOutput: unitsToDecimal(received.toString(), 6), receivedOutputBaseUnits: received.toString(),
+				...(confirmations >= 2 ? { completedAt: new Date().toISOString() } : {}),
+			});
+		} catch (error) {
+			return await this.database.updatePendingSwap(clientId, txHash, stored.status, { lastError: error instanceof Error ? error.message : String(error) });
+		}
 	}
 
 	private async refreshChainflip(clientId: string, txHash: string, stored: StoredPendingSwap): Promise<StoredPendingSwap | null> {
