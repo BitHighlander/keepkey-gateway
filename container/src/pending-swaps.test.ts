@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import type { Database, StoredPendingSwap } from "./database";
 import { PendingSwapError, PendingSwapService } from "./pending-swaps";
+import { AbiCoder } from "ethers";
+import { UNISWAP_EXECUTE, UNISWAP_ROUTER } from "./uniswap";
 
 const valid = {
 	txHash: "0xABCDEF0123456789",
@@ -71,6 +73,17 @@ describe("PostgreSQL pending swap contract", () => {
 		const service = new PendingSwapService(fakeDatabase());
 		expect(service.create("client-a", { ...valid, txHash: "bad hash" })).rejects.toBeInstanceOf(PendingSwapError);
 		expect(service.create("client-a", { ...valid, buyAsset: {} })).rejects.toBeInstanceOf(PendingSwapError);
+	});
+
+	test("waits for a separate solver payout even for a same-chain success", async () => {
+		let hashes: string[] = [];
+		const service = new PendingSwapService(fakeDatabase(), { initialGraceMs: 0, refreshIntervalMs: 0,
+			fetch: (async () => Response.json({ status: "success", inTxHashes: [valid.txHash], txHashes: hashes, originChainId: 1, destinationChainId: 1 })) as unknown as typeof fetch });
+		await service.create("fixture", { ...valid, relayData: { requestId: "relay-request", executionMode: "solver-deposit" } });
+		const pending = await service.get("fixture", valid.txHash, true);
+		expect(pending?.status).toBe("output_confirming"); expect(pending?.outboundTxid).toBeUndefined();
+		hashes = ["0xpayout"];
+		expect(await service.get("fixture", valid.txHash, true)).toMatchObject({ status: "completed", outboundTxid: "0xpayout" });
 	});
 
 	test("refreshes Relay only on read demand and stops forever at terminal state", async () => {
@@ -225,4 +238,41 @@ test("BSC USDT output uses 18 decimals", async () => {
 	const service = new PendingSwapService(database, { fetch: (async () => Response.json({ state: "COMPLETED", srcChain: "Ethereum", srcAsset: "ETH", destChain: "Bsc", destAsset: "USDT", destAddress: valid.buyAsset.address, deposit: { txRef: valid.txHash }, swapEgress: { txRef: "outbound", amount: "1230000000000000000", witnessedAt: 1787528101000 } })) as unknown as typeof fetch });
 	await service.create("fixture", { ...valid, integration: "chainflip", swapper: "Chainflip", buyAsset: { ...valid.buyAsset, symbol: "USDT", networkId: "eip155:56" } });
 	expect(await service.get("fixture", valid.txHash, true)).toMatchObject({ status: "completed", receivedOutput: "1.23" });
+});
+
+
+describe("direct Uniswap payout tracking", () => {
+ const abi = AbiCoder.defaultAbiCoder();
+ const token = "0xdac17f958d2ee523a2206206994597c13d831ec7";
+ const transfer = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+ const record = { ...valid, txHash: "0x" + "a".repeat(64), integration: "uniswap", swapper: "Uniswap",
+   buyAsset: { ...valid.buyAsset, networkId: "eip155:1", caip: `eip155:1/erc20:${token}`, symbol: "USDT" } };
+ const input = UNISWAP_EXECUTE.encodeFunctionData("execute", ["0x0b000604", ["0x", "0x", "0x",
+   abi.encode(["address", "address", "uint256"], [token, record.buyAsset.address, 24000000])], 9999999999]);
+ const tx = { hash: record.txHash, from: record.sellAsset.address, to: UNISWAP_ROUTER, value: record.sellAsset.amountBaseUnits, input };
+ const receipt = { transactionHash: record.txHash, to: UNISWAP_ROUTER, status: "0x1", blockNumber: "0x10", logs: [
+   { address: token, topics: [transfer, "0x" + "0".repeat(64), "0x" + record.buyAsset.address.slice(2).padStart(64, "0")], data: "0x" + (24900000).toString(16) },
+ ] };
+ async function poll(overrides: { tx?: any; receipt?: any; head?: string } = {}) {
+   const service = new PendingSwapService(fakeDatabase(), { initialGraceMs: 0, refreshIntervalMs: 0, evm: {
+     lookupTransaction: async () => ({ success: true, data: { tx: overrides.tx ?? tx, receipt: overrides.receipt ?? receipt } }),
+     readRpc: async () => ({ success: true, data: overrides.head ?? "0x11" }),
+   } });
+   await service.create("fixture", record);
+   return service.get("fixture", record.txHash, true);
+ }
+ test("uses receipt transfers for actual received output and waits for confirmations", async () => {
+   expect(await poll()).toMatchObject({ status: "completed", receivedOutput: "24.9", outboundTxid: record.txHash, confirmations: 2 });
+   expect(await poll({ head: "0x10" })).toMatchObject({ status: "output_confirming", receivedOutput: "24.9" });
+ });
+ test("reports a matching reverted transaction as failed", async () => {
+   expect(await poll({ receipt: { ...receipt, status: "0x0", logs: [] } })).toMatchObject({ status: "failed", error: "Uniswap transaction reverted" });
+ });
+ test("does not declare completion for a wrong transaction or missing matching payout", async () => {
+   for (const override of [{ tx: { ...tx, from: record.buyAsset.address } }, { tx: { ...tx, value: "1" } },
+     { receipt: { ...receipt, logs: [] } }, { receipt: { ...receipt, transactionHash: "0xwrong" } },
+     { receipt: { ...receipt, logs: [{ ...receipt.logs[0], address: record.buyAsset.address }] } }]) {
+     expect((await poll(override))?.status).toBe("pending");
+   }
+ });
 });

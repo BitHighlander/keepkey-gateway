@@ -35,6 +35,7 @@ export interface SwapHealthObservation {
 interface CatalogOptions {
 	zeroxEnabled?: boolean;
 	swapkitEnabled?: boolean;
+	uniswapEnabled?: boolean;
 }
 
 const ASSETS = Object.values(assetData) as DiscoveryAsset[];
@@ -85,6 +86,7 @@ export class Catalog {
 				{ key: "thorchain", label: "THORChain", status: "unknown", detail: "Checked on quote demand; no background polling" },
 				{ key: "mayachain", label: "Mayachain", status: "unknown", detail: "Checked on quote demand; no background polling" },
 				{ key: "relay", label: "Relay", status: "unknown", detail: "Checked on quote demand; no background polling" },
+				{ key: "uniswap", label: "Uniswap", status: this.options.uniswapEnabled ? "unknown" : "disabled", detail: this.options.uniswapEnabled ? "Direct Ethereum ETH to USDT/USDC; checked on quote demand" : "EVM node is not configured" },
 				{ key: "zeroex", label: "0x", status: this.options.zeroxEnabled ? "unknown" : "disabled", detail: this.options.zeroxEnabled ? "API-key and app-fee route checked on quote demand" : "ZEROX_API_KEY is not configured" },
 				{ key: "shapeshift", label: "ShapeShift", status: "unknown", detail: "Partner-attributed fallback (including moving swappers such as Chainflip/NEAR); checked only on quote demand" },
 				{ key: "chainflip", label: "Chainflip", status: "gated", detail: "Available through ShapeShift; a direct KeepKey broker is not configured" },

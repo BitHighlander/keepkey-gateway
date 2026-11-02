@@ -4,6 +4,7 @@ import swapAssetsSnapshot from "../data/swap-assets.json";
 import supportedChainsSnapshot from "../data/swap-supported-chains.json";
 import type { EvmClient } from "./evm";
 import type { SwapHealthObservation } from "./catalog";
+import { UniswapQuoteAdapter } from "./uniswap";
 import {
 	AddressLookupTableAccount,
 	AddressLookupTableProgram,
@@ -21,6 +22,8 @@ export interface QuoteRequest {
 	senderAddress: string;
 	slippage?: number;
 	memoless?: boolean;
+	/** Requests a simple solver deposit, never a self-executed multicall. */
+	relayExecutionMode?: "solver-deposit";
 }
 
 export interface QuoteAdapter {
@@ -156,6 +159,28 @@ function evmCurrencyAddress(caip: string): string | null {
 	return null;
 }
 
+/** Validate the actual deposit, independently of Relay's mode labels. Device
+ * certificate availability is checked by the wallet for its own firmware. */
+function validateRelaySolverDeposit(request: QuoteRequest, tx: any, amount: string): void {
+	const native = evmCurrencyAddress(request.sellAsset) === "0x0000000000000000000000000000000000000000";
+	const data = String(tx.data).toLowerCase();
+	const addressWord = (address: string) => address.toLowerCase().replace(/^0x/, "").padStart(64, "0");
+	const reject = () => { throw new SwapError("Relay did not return the requested solver deposit"); };
+	if (String(tx.to).toLowerCase() !== "0x4cd00e387622c35bddb9b4c962c136462338bc31"
+		|| Number(tx.chainId) !== evmChainNumber(request.sellAsset)
+		|| !/^0x[0-9a-f]+$/.test(data)
+		|| data.length !== (native ? 138 : 266)
+		|| !data.startsWith(native ? "0x49290c1c" : "0xe8017952")) reject();
+	const depositor = data.slice(10, 74);
+	if (depositor !== "0".repeat(64) && depositor !== addressWord(request.senderAddress)) reject();
+	try {
+		if (BigInt(tx.value || "0") !== (native ? BigInt(amount) : 0n)) reject();
+		if (!native && (data.slice(74, 138) !== addressWord(evmCurrencyAddress(request.sellAsset)!)
+			|| BigInt(`0x${data.slice(138, 202)}`) !== BigInt(amount))) reject();
+		if (BigInt(`0x${data.slice(-64)}`) === 0n) reject();
+	} catch { reject(); }
+}
+
 export class RelayQuoteAdapter implements QuoteAdapter {
 	readonly key = "relay";
 	constructor(private readonly fetcher: typeof fetch = fetch) {}
@@ -190,6 +215,7 @@ export class RelayQuoteAdapter implements QuoteAdapter {
 				amount,
 				recipient: request.recipientAddress,
 				tradeType: "EXACT_INPUT",
+				...(request.relayExecutionMode === "solver-deposit" ? { forceSolverExecution: true, explicitDeposit: true } : {}),
 				appFees: [{ recipient: RELAY_APP_FEE_RECIPIENT, fee: String(RELAY_APP_FEE_BPS) }],
 			}),
 			signal: AbortSignal.timeout(15_000),
@@ -197,15 +223,17 @@ export class RelayQuoteAdapter implements QuoteAdapter {
 		const raw = await response.json().catch(() => null) as any;
 		if (!response.ok) throw new SwapError(`Relay quote failed (${response.status}): ${raw?.message || raw?.error || "unknown error"}`, response.status === 400 ? 422 : 502);
 
-		const transactionItem = (raw.steps || [])
+		const transactionItems = (raw.steps || [])
 			.filter((step: any) => !["approve", "approval"].includes(String(step.id || step.kind).toLowerCase()))
 			.flatMap((step: any) => step.items || [step])
-			.find((item: any) => {
+			.filter((item: any) => {
 				const data = item.data || item;
 				return typeof data.to === "string" && typeof data.data === "string";
 			});
-		const txData = transactionItem?.data || transactionItem;
+		if (request.relayExecutionMode === "solver-deposit" && transactionItems.length !== 1) throw new SwapError("Relay returned an unexpected solver transaction count");
+		const txData = transactionItems[0]?.data || transactionItems[0];
 		if (!txData?.to || !txData?.data || txData.data.length < 10) throw new SwapError("Relay returned no executable EVM transaction");
+		if (request.relayExecutionMode === "solver-deposit") validateRelaySolverDeposit(request, txData, amount);
 
 		const currencyOut = raw.details?.currencyOut;
 		const outUnits = String(currencyOut?.amount || "");
@@ -236,7 +264,8 @@ export class RelayQuoteAdapter implements QuoteAdapter {
 			amountOut: unitsToDecimal(outUnits, outputDecimals),
 			amountOutMin: unitsToDecimal(minimumUnits, outputDecimals),
 			buyAmount: unitsToDecimal(outUnits, outputDecimals),
-			meta: { quoteMode: "RELAY_DIRECT", originChainId, destinationChainId, feeBreakdown: {
+			meta: { quoteMode: "RELAY_DIRECT", originChainId, destinationChainId,
+				...(request.relayExecutionMode === "solver-deposit" ? { executionMode: "solver-deposit" } : {}), feeBreakdown: {
 				integrator: { bps: RELAY_APP_FEE_BPS, recipient: RELAY_APP_FEE_RECIPIENT },
 				sourceNetwork: { amountBaseUnits: String(raw.fees?.gas?.amount || "0"), asset: CHAINS[networkId(request.sellAsset)]?.nativeAssetCaip },
 				...(Number.isFinite(totalImpactPercent) ? { priceImpactPercent: totalImpactPercent } : {}),
@@ -891,6 +920,7 @@ export class QuoteRouter {
 }
 
 function validateQuoteRequest(request: QuoteRequest): void {
+	if (request.relayExecutionMode !== undefined && request.relayExecutionMode !== "solver-deposit") throw new SwapError("Invalid Relay execution mode", 400);
 	for (const field of ["sellAsset", "buyAsset", "sellAmount", "recipientAddress", "senderAddress"] as const) {
 		if (typeof request[field] !== "string" || !request[field].trim()) throw new SwapError(`${field} is required`, 400);
 	}
@@ -913,6 +943,7 @@ export function createQuoteRouter(options: { fetch?: typeof fetch; zeroxApiKey?:
 		new ShapeShiftQuoteAdapter(fetcher, options.nownodesApiKey),
 	];
 	if (options.zeroxApiKey) adapters.push(new ZeroXQuoteAdapter(options.zeroxApiKey, fetcher));
+	if (options.evm) adapters.push(new UniswapQuoteAdapter(options.evm));
 	if (options.swapkitApiKey) adapters.push(new SwapKitQuoteAdapter(options.swapkitApiKey, fetcher));
 	return new QuoteRouter(adapters, options.evm ? { validateQuote: (request, quote) => validateNativeEvmQuote(options.evm!, request, quote) } : {});
 }
