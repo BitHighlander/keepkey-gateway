@@ -86,7 +86,7 @@ function findAsset(caip: string): AssetRecord | undefined {
 function exactDecimalToUnits(amount: string, decimals: number): string {
 	if (!/^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(amount)) throw new SwapError("sellAmount must be a positive decimal string", 400);
 	const [whole, fraction = ""] = amount.split(".");
-	if (fraction.length > decimals && /[1-9]/.test(fraction.slice(decimals))) throw new SwapError(`sellAmount exceeds ${decimals}-decimal protocol precision`, 400);
+	if (fraction.length > decimals && /[1-9]/.test(fraction.slice(decimals))) throw new SwapError(`sellAmount exceeds ${decimals}-decimal asset precision`, 400);
 	const units = BigInt(`${whole}${fraction.slice(0, decimals).padEnd(decimals, "0")}`);
 	if (units <= 0n) throw new SwapError("sellAmount must be greater than zero", 400);
 	return units.toString();
@@ -781,7 +781,18 @@ export class ProtocolQuoteAdapter implements QuoteAdapter {
 		const buy = protocolAsset(request.buyAsset, this.key);
 		if (!sell || !buy) throw new SwapError(`${this.key} does not support this pair`, 422);
 		const config = PROTOCOLS[this.key];
-		const sellUnits = exactDecimalToUnits(request.sellAmount, protocolDecimals(this.key, sell));
+		// The source chain and protocol use different units: ETH deposits accept
+		// 18 decimals, while THORChain/Maya quotes normalize ETH to 8. Validate
+		// native precision first, then floor only the protocol quote quantity.
+		// Keep the exact requested deposit amount in txParams below.
+		const sourceDecimals = findAsset(request.sellAsset)?.decimals ?? SWAP_ASSETS.get(request.sellAsset.toLowerCase())?.decimals;
+		if (sourceDecimals == null) throw new SwapError(`Unknown source precision for ${request.sellAsset}`, 422);
+		const sourceUnits = BigInt(exactDecimalToUnits(request.sellAmount, sourceDecimals));
+		const quoteDecimals = protocolDecimals(this.key, sell);
+		const quoteNumerator = sourceUnits * 10n ** BigInt(quoteDecimals);
+		const sourceScale = 10n ** BigInt(sourceDecimals);
+		const sellUnits = (quoteNumerator / sourceScale).toString();
+		if (sellUnits === "0") throw new SwapError(`sellAmount is below ${config.label}'s minimum ${quoteDecimals}-decimal quote unit`, 422);
 		const query = new URLSearchParams({
 			from_asset: sell,
 			to_asset: buy,
@@ -834,7 +845,10 @@ export class ProtocolQuoteAdapter implements QuoteAdapter {
 			inbound_address: raw.inbound_address,
 			router: raw.router,
 			txs: [{ type, chain: networkId(request.sellAsset), txParams }],
-			meta: { quoteMode: `${config.label.toUpperCase()}_DIRECT` },
+			meta: { quoteMode: `${config.label.toUpperCase()}_DIRECT`, inputPrecision: {
+				sourceDecimals, protocolDecimals: quoteDecimals, sourceBaseUnits: sourceUnits.toString(),
+				protocolBaseUnits: sellUnits, roundedDown: quoteNumerator % sourceScale !== 0n,
+			} },
 			steps: 1,
 			complete: true,
 			raw,
