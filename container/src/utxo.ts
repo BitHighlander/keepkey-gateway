@@ -180,7 +180,7 @@ export class UtxoClient {
 		});
 	}
 
-	async getTransactionHistory(networkValue: string, publicKey: string): Promise<any[]> {
+	async getTransactionHistory(networkValue: string, publicKey: string, options: { forceRefresh?: boolean } = {}): Promise<any[]> {
 		const network = this.resolveNetwork(networkValue);
 		const normalized = normalizeExtendedKeyVersion(publicKey);
 		if (!normalized || normalized.length > 512) throw new UtxoError("Invalid public key or address", 400);
@@ -211,7 +211,7 @@ export class UtxoClient {
 					fee: tx?.fees == null ? undefined : String(tx.fees),
 				};
 			});
-		});
+		}, options);
 	}
 
 	async getFeeRate(networkValue: string): Promise<{ slow: number; average: number; fast: number; fastest: number }> {

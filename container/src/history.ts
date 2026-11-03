@@ -31,7 +31,7 @@ export class HistoryClient {
 		hive?: Pick<HiveClient, "account" | "history">;
 	}) {}
 
-	async getTransactionHistory(body: HistoryRequest): Promise<Record<string, unknown>> {
+	async getTransactionHistory(body: HistoryRequest, options: { forceRefresh?: boolean } = {}): Promise<Record<string, unknown>> {
 		this.validate(body);
 		const fetchedAt = Date.now();
 		const fetchedAtISO = new Date(fetchedAt).toISOString();
@@ -50,7 +50,7 @@ export class HistoryClient {
 		// own error, and transactions is omitted rather than presented as empty.
 		const histories = await Promise.all(queries.map(async (query) => {
 			try {
-				const transactions = await this.queryTransactions(query, page, evmTransactions);
+				const transactions = await this.queryTransactions(query, page, evmTransactions, options);
 				return { caip: query.caip, pubkey: query.pubkey, transactions, fetchedAt, fetchedAtISO, page, cached: false, fresh: true, loading: false };
 			} catch (error) {
 				return { caip: query.caip, pubkey: query.pubkey, failure: error, fetchedAt, fetchedAtISO, page, cached: false, fresh: false, loading: false };
@@ -62,10 +62,10 @@ export class HistoryClient {
 		return { success: true, histories: histories.map(({ failure, ...history }: any) => failure === undefined ? history : { ...history, error: describeFailure(failure) }) };
 	}
 
-	private async queryTransactions(query: { caip: string; pubkey: string; networkId: string }, page: number, evmTransactions: Map<string, Promise<any[]>>): Promise<any[]> {
+	private async queryTransactions(query: { caip: string; pubkey: string; networkId: string }, page: number, evmTransactions: Map<string, Promise<any[]>>, options: { forceRefresh?: boolean }): Promise<any[]> {
 		if (query.networkId.startsWith("bip122:")) {
 			if (!this.dependencies.utxo) throw new HistoryError("UTXO transaction history is not configured", 503);
-			return (await this.dependencies.utxo.getTransactionHistory(query.networkId, query.pubkey)).map((transaction) => ({ ...transaction, caip: query.caip, networkId: query.networkId }));
+			return (await this.dependencies.utxo.getTransactionHistory(query.networkId, query.pubkey, options)).map((transaction) => ({ ...transaction, caip: query.caip, networkId: query.networkId }));
 		}
 		if (query.networkId.startsWith("eip155:")) {
 			if (!this.dependencies.zerion) throw new HistoryError("EVM transaction history is not configured", 503);
