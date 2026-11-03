@@ -15,7 +15,27 @@ export function openApiDocument(requestUrl: string): Record<string, unknown> {
 		},
 		paths: {
 			"/events/subscribe": {
-				post: { operationId: "SubscribeEvents", security: [{ queryKey: [] }], requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["addresses"], properties: { addresses: { type: "array", minItems: 1, maxItems: 200, items: { type: "object", required: ["address", "networkId"] } }, events: { type: "array", items: { type: "string", enum: ["tx:incoming", "tx:confirmed"] } } } } } } }, responses: { 200: { description: "Authenticated event stream" }, 401: { description: "Unauthorized" } } },
+				post: { operationId: "SubscribeEvents", security: [{ queryKey: [] }], requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["addresses"], properties: { addresses: { type: "array", minItems: 1, maxItems: 200, items: { type: "object", required: ["address", "networkId"] } }, events: { type: "array", items: { type: "string", enum: ["tx:incoming", "tx:confirmed"] } }, since: { type: "integer", description: "Epoch-millisecond reconnect cursor; catch-up is bounded to 24 hours." }, walletScope: { type: "string", description: "Optional standard-wallet queue scope; omit for ephemeral sessions." } } } } } }, responses: { 200: { description: "Authenticated event stream" }, 401: { description: "Unauthorized" } } },
+			},
+			"/events/watches": {
+				post: { operationId: "RegisterPaymentWatches", security: [{ queryKey: [] }], requestBody: { required: true, content: { "application/json": { schema: {
+					type: "object", required: ["walletScope", "enabled"], properties: {
+						walletScope: { type: "string", maxLength: 160 }, enabled: { type: "boolean" }, revision: { type: "integer" }, since: { type: "integer" },
+						addresses: { type: "array", maxItems: 200, items: { type: "object", required: ["address", "networkId"], properties: { address: { type: "string" }, networkId: { type: "string" } } } },
+					},
+				} } } }, responses: providerResponses("Explicit durable payment watches; disconnect does not remove registrations") },
+			},
+			"/events/replay": {
+				get: { operationId: "ReplayPaymentEvents", security: [{ queryKey: [] }], parameters: [
+					{ name: "walletScope", in: "query", required: true, schema: { type: "string" } },
+					{ name: "after", in: "query", schema: { type: "string" }, description: "Opaque PostgreSQL delivery cursor, separate from the SSE epoch cursor." },
+					{ name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 500 } },
+				], responses: providerResponses("Unacknowledged wallet-scoped payment refresh hints retained for seven days") },
+			},
+			"/events/ack": {
+				post: { operationId: "AcknowledgePaymentEvents", security: [{ queryKey: [] }], requestBody: { required: true, content: { "application/json": { schema: {
+					type: "object", required: ["walletScope"], properties: { walletScope: { type: "string" }, cursor: { type: "string" }, eventIds: { type: "array", maxItems: 500, items: { type: "string" } } },
+				} } } }, responses: providerResponses("Acknowledge only after the current wallet has reconciled its balances/history") },
 			},
 			"/telemetry/vault": {
 				post: { operationId: "RecordVaultPerformance", security: [{ queryKey: [] }], requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["records"], properties: { records: { type: "array", maxItems: 100, items: { type: "object" } } } } } } }, responses: { 200: { description: "Accepted telemetry count" }, 401: { description: "Unauthorized" } } },
@@ -138,7 +158,7 @@ export function openApiDocument(requestUrl: string): Record<string, unknown> {
 				post: {
 					operationId: "GetPortfolioBalances",
 					security: [{ queryKey: [] }],
-					parameters: [{ name: "forceRefresh", in: "query", required: false, description: "For UTXO accounts, bypass balance caches and stale fallback. Other providers retain their normal cache policy.", schema: { type: "boolean" } }],
+					parameters: [{ name: "forceRefresh", in: "query", required: false, description: "Bypass wallet balance caches and stale fallback for a fresh provider read. Pricing and static asset metadata retain their normal cache policy.", schema: { type: "boolean" } }],
 					requestBody: {
 						required: true,
 						content: {
@@ -182,7 +202,7 @@ export function openApiDocument(requestUrl: string): Record<string, unknown> {
 				post: {
 					operationId: "GetTransactionHistory",
 					security: [{ queryKey: [] }],
-					parameters: [{ name: "forceRefresh", in: "query", required: false, description: "For UTXO histories, bypass history caches and stale fallback to observe new transactions and confirmations. Other providers retain their normal cache policy.", schema: { type: "boolean" } }],
+					parameters: [{ name: "forceRefresh", in: "query", required: false, description: "Bypass history caches and stale fallback to observe new transactions and confirmations.", schema: { type: "boolean" } }],
 					requestBody: {
 						required: true,
 						content: { "application/json": { schema: {

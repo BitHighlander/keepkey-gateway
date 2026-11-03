@@ -142,4 +142,47 @@ export const migrations: readonly Migration[] = [
 			`CREATE INDEX IF NOT EXISTS hive_onboarding_client_time_idx ON hive_onboarding_claims (client_id, created_at DESC)`,
 		],
 	},
+	{
+		version: 6,
+		name: "durable_realtime_watches_and_delivery",
+		statements: [
+			`CREATE TABLE IF NOT EXISTS realtime_wallets (
+				client_id uuid NOT NULL REFERENCES api_clients(id) ON DELETE CASCADE,
+				wallet_scope text NOT NULL,
+				revision bigint NOT NULL,
+				enabled boolean NOT NULL DEFAULT true,
+				created_at timestamptz NOT NULL DEFAULT now(),
+				updated_at timestamptz NOT NULL DEFAULT now(),
+				PRIMARY KEY (client_id, wallet_scope)
+			)`,
+			`CREATE TABLE IF NOT EXISTS realtime_watches (
+				client_id uuid NOT NULL,
+				wallet_scope text NOT NULL,
+				watch_id text NOT NULL,
+				network_id text NOT NULL,
+				address text NOT NULL,
+				since_at timestamptz NOT NULL,
+				created_at timestamptz NOT NULL DEFAULT now(),
+				PRIMARY KEY (client_id, wallet_scope, watch_id),
+				FOREIGN KEY (client_id, wallet_scope) REFERENCES realtime_wallets(client_id, wallet_scope) ON DELETE CASCADE
+			)`,
+			`CREATE INDEX IF NOT EXISTS realtime_watches_watch_idx ON realtime_watches (watch_id)`,
+			`CREATE TABLE IF NOT EXISTS realtime_events (
+				id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+				client_id uuid NOT NULL,
+				wallet_scope text NOT NULL,
+				watch_id text NOT NULL,
+				event_id text NOT NULL,
+				event_name text NOT NULL CHECK (event_name IN ('tx:incoming', 'tx:confirmed')),
+				payload_json jsonb NOT NULL,
+				created_at timestamptz NOT NULL DEFAULT now(),
+				expires_at timestamptz NOT NULL DEFAULT now() + interval '7 days',
+				acked_at timestamptz,
+				UNIQUE (client_id, wallet_scope, event_id),
+				FOREIGN KEY (client_id, wallet_scope, watch_id) REFERENCES realtime_watches(client_id, wallet_scope, watch_id) ON DELETE CASCADE
+			)`,
+			`CREATE INDEX IF NOT EXISTS realtime_events_replay_idx ON realtime_events (client_id, wallet_scope, id) WHERE acked_at IS NULL`,
+			`CREATE INDEX IF NOT EXISTS realtime_events_expiry_idx ON realtime_events (expires_at)`,
+		],
+	},
 ];

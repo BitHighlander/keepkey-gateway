@@ -34,7 +34,7 @@ describe("connection-scoped realtime", () => {
 		await two.body!.cancel();
 	});
 
-	test("batches watches and backs off after quiet snapshots", async () => {
+	test("batches watches and keeps active fallback on a bounded cadence", async () => {
 		let calls = 0;
 		let largestBatch = 0;
 		const hub = new RealtimeHub({ getTransactionHistory: async (body: any) => {
@@ -50,8 +50,8 @@ describe("connection-scoped realtime", () => {
 		await reader.read();
 		await Bun.sleep(75);
 		expect(largestBatch).toBe(2);
-		// Immediate + 10ms + 20ms + 40ms. A fixed 10ms loop would be >= 7.
-		expect(calls).toBeLessThanOrEqual(4);
+		expect(calls).toBeGreaterThanOrEqual(5);
+		expect(calls).toBeLessThanOrEqual(9);
 		await reader.cancel();
 	});
 
@@ -69,4 +69,20 @@ describe("connection-scoped realtime", () => {
 		expect(first).toContain('"unsupported":["unknown:1"]');
 		await reader.cancel();
 	});
+});
+
+test("initial subscribe sends another coalesced refresh hint after the first baseline is actually ready", async () => {
+ let release!: (value: any) => void;
+ const pending = new Promise(resolve => { release = resolve; });
+ const hub = new RealtimeHub({ getTransactionHistory: async () => pending } as any, 60_000);
+ const response = hub.createSse("client", [{ address: ADDRESS, networkId: NETWORK }], undefined);
+ const reader = response.body!.getReader(); const decode = (value: any) => new TextDecoder().decode(value);
+ expect(decode((await reader.read()).value)).toContain("connected");
+ expect(decode((await reader.read()).value)).toContain('"reason":"subscribe"');
+ // This transaction arrives after the caller's balance read but before the
+ // gateway establishes its first history snapshot; legacy callers have no since.
+ release({ histories: [{ transactions: [{ txid: "new-mempool-transaction", status: "pending", timestamp: Date.now() }] }] });
+ const ready = decode((await reader.read()).value);
+ expect(ready).toContain("sync:required"); expect(ready).toContain('"reason":"baseline_ready"');
+ expect(ready).toContain('"refreshHint":true'); await reader.cancel();
 });

@@ -6,6 +6,7 @@ export interface AppConfig {
 	databaseMaxConnections: number;
 	zerionApiKey?: string;
 	nownodesApiKey?: string;
+	realtimeSchedulerSecret?: string;
 	coingeckoApiKey?: string;
 	swapkitApiKey?: string;
 	zeroxApiKey?: string;
@@ -47,6 +48,7 @@ export function loadConfig(env: Environment = process.env): AppConfig {
 		databaseMaxConnections: integer(env, "DATABASE_MAX_CONNECTIONS", 5, 1, 20),
 		zerionApiKey: env.ZERION_API_KEY?.trim() || undefined,
 		nownodesApiKey: env.NOWNODES_API_KEY?.trim() || undefined,
+		realtimeSchedulerSecret: env.REALTIME_SCHEDULER_SECRET?.trim() || undefined,
 		coingeckoApiKey: env.COINGECKO_API_KEY?.trim() || undefined,
 		swapkitApiKey: env.SWAPKIT_API_KEY?.trim() || undefined,
 		zeroxApiKey: env.ZEROX_API_KEY?.trim() || undefined,

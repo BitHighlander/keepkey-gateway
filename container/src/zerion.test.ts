@@ -174,3 +174,29 @@ describe("normalizeZerionTransactions", () => {
 		}]);
 	});
 });
+
+test("forced live wallet/history reads bypass warm caches and never relabel stale data as fresh", async () => {
+ const values = new Map<string, unknown>(); let calls = 0, staleReads = 0, balance = "0", confirmed = false, offline = false;
+ const cache = {
+  getFresh: async <T>(n: string, k: string) => (values.get(`${n}:${k}`) as T) ?? null,
+  getStale: async <T>(n: string, k: string) => { staleReads++; return (values.get(`${n}:${k}`) as T) ?? null; },
+  set: async (n: string, k: string, v: unknown) => { values.set(`${n}:${k}`, v); },
+  runExclusive: async <T>(_key: string, task: () => Promise<T>) => task(),
+ };
+ const client = new ZerionClient({ apiKey: "fixture", cache, fetch: (async input => {
+  const url = String(input); calls++; await Bun.sleep(1);
+  if (url.endsWith("/chains/")) return Response.json({ data: [{ id: "ethereum", attributes: { external_id: "0x1" } }] });
+  if (offline) return Response.json({ error: "offline" }, { status: 503 });
+  if (url.includes("/positions/")) return Response.json({ data: [{ type: "positions", attributes: { value: 1, quantity: { numeric: balance, decimals: 18 }, fungible_info: { symbol: "ETH", name: "Ethereum", implementations: [{ chain_id: "ethereum", decimals: 18 }] } }, relationships: { chain: { data: { id: "ethereum" } } } }] });
+  return Response.json({ data: [{ type: "transactions", attributes: { hash: `0x${"a".repeat(64)}`, operation_type: "receive", status: confirmed ? "confirmed" : "pending", mined_at: "2026-11-03T20:00:00Z", transfers: [] }, relationships: { chain: { data: { id: "ethereum" } } } }] });
+ }) as typeof fetch });
+ expect(await client.getWalletPositions(ADDRESS)).toEqual([]);
+ expect((await client.getTransactions(ADDRESS))[0].status).toBe("pending");
+ const warmed = calls; balance = "2"; confirmed = true;
+ expect(await client.getWalletPositions(ADDRESS)).toEqual([]); expect((await client.getTransactions(ADDRESS))[0].status).toBe("pending"); expect(calls).toBe(warmed);
+ const [wallet, history, duplicate] = await Promise.all([client.getWalletPositions(ADDRESS, { forceRefresh: true }), client.getTransactions(ADDRESS, { forceRefresh: true }), client.getTransactions(ADDRESS, { forceRefresh: true })]);
+ expect(wallet[0].balance).toBe("2"); expect(history[0].status).toBe("confirmed"); expect(duplicate).toEqual(history); expect(calls).toBe(warmed + 2);
+ offline = true;
+ await expect(client.getWalletPositions(ADDRESS, { forceRefresh: true })).rejects.toThrow();
+ await expect(client.getTransactions(ADDRESS, { forceRefresh: true })).rejects.toThrow(); expect(staleReads).toBe(0);
+});

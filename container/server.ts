@@ -19,6 +19,9 @@ import { VaultTelemetry } from "./src/telemetry";
 import { ChainHistoryClient } from "./src/chain-history";
 import { MultichainBroadcastClient } from "./src/multichain-broadcast";
 import { RealtimeHub } from "./src/realtime";
+import { BlockbookLiveFeed } from "./src/blockbook-live";
+import { RealtimeSocketSession } from "./src/realtime-socket";
+import { RealtimeMonitor } from "./src/realtime-monitor";
 
 const config = loadConfig();
 const database = createDatabase(config);
@@ -62,10 +65,16 @@ const cosmosFeatures = new CosmosFeatures(database);
 const telemetry = new VaultTelemetry(database);
 const multichainBroadcast = config.nownodesApiKey ? new MultichainBroadcastClient({ apiKey: config.nownodesApiKey }) : undefined;
 const realtime = new RealtimeHub(history);
+if (utxo) realtime.setUpstream(new BlockbookLiveFeed(utxo, {
+	change: (watch, txid, confirmed) => realtime.upstreamChange(watch, txid, confirmed),
+	sync: (networkId, reason) => realtime.upstreamSync(networkId, reason),
+}));
+const realtimeMonitor = database.realtime && config.realtimeSchedulerSecret
+	? new RealtimeMonitor(history, database.realtime, (clientId, walletScope, eventName, payload, cursor) => realtime.publishStored(clientId, walletScope, eventName, payload, cursor)) : undefined;
 
-const app = createApp({ config, database, zerion, evm, market, utxo, portfolio, history, account, solana, catalog, quoteRouter, pendingSwaps, cosmosFeatures, hive, telemetry, multichainBroadcast, realtime });
+const app = createApp({ config, database, zerion, evm, market, utxo, portfolio, history, account, solana, catalog, quoteRouter, pendingSwaps, cosmosFeatures, hive, telemetry, multichainBroadcast, realtime, realtimeMonitor });
 
-interface SocketData { id: string; clientId?: string; heartbeat?: ReturnType<typeof setInterval> }
+interface SocketData { id: string; session?: RealtimeSocketSession; lastPong?: number; heartbeat?: ReturnType<typeof setInterval> }
 const server = Bun.serve<SocketData>({
 	port: config.port,
 	// Provider fallbacks are individually bounded but a cold multi-chain request
@@ -83,26 +92,27 @@ const server = Bun.serve<SocketData>({
 	websocket: {
 		open(ws) {
 			ws.send(`0${JSON.stringify({ sid: ws.data.id, upgrades: [], pingInterval: 25_000, pingTimeout: 20_000, maxPayload: 1_000_000 })}`);
-			ws.data.heartbeat = setInterval(() => { try { ws.send("2"); } catch { ws.close(); } }, 25_000);
+			ws.data.lastPong = Date.now();
+			ws.data.session = new RealtimeSocketSession(ws.data.id, realtime, key => database.authenticate(key),
+				(name, data) => ws.send(`42${JSON.stringify([name, data])}`), (code, reason) => ws.close(code, reason));
+			ws.data.heartbeat = setInterval(() => {
+				if (Date.now() - (ws.data.lastPong || 0) > 45_000) { ws.data.session?.close(); ws.close(4000, "heartbeat timeout"); return; }
+				try { ws.send("2"); } catch { ws.data.session?.close(); ws.close(); }
+			}, 25_000);
 		},
 		async message(ws, input) {
 			const frame = typeof input === "string" ? input : Buffer.from(input).toString("utf8");
 			if (frame === "40") { ws.send(`40${JSON.stringify({ sid: ws.data.id })}`); return; }
-			if (frame === "3") return;
+			if (frame === "3") { ws.data.lastPong = Date.now(); return; }
 			if (!frame.startsWith("42")) return;
 			try {
 				const [event, payload] = JSON.parse(frame.slice(2));
-				if (event !== "authenticate" || typeof payload?.queryKey !== "string") return;
-				const client = await database.authenticate(payload.queryKey);
-				if (!client) { ws.send(`42${JSON.stringify(["authenticated", { success: false }])}`); ws.close(4001, "unauthorized"); return; }
-				ws.data.clientId = client.id;
-				realtime.addSocket(client.id, ws.data.id, (name, data) => ws.send(`42${JSON.stringify([name, data])}`));
-				ws.send(`42${JSON.stringify(["authenticated", { success: true, username: client.username }])}`);
-			} catch { ws.close(4002, "invalid frame"); }
+				await ws.data.session?.receive(event, payload);
+			} catch { ws.data.session?.close(); ws.close(4002, "invalid frame"); }
 		},
 		close(ws) {
 			if (ws.data.heartbeat) clearInterval(ws.data.heartbeat);
-			realtime.removeSocket(ws.data.clientId, ws.data.id);
+			ws.data.session?.close();
 		},
 	},
 });
@@ -133,6 +143,7 @@ async function shutdown(signal: string): Promise<void> {
 	console.log(JSON.stringify({ event: "server_stopping", signal }));
 	// Container SIGTERM must not hang forever on open SSE/WebSocket sessions.
 	// Clients reconnect; force-close network sessions before releasing Postgres.
+	realtime.close();
 	server.stop(true);
 	await database.close();
 }

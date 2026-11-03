@@ -24,7 +24,7 @@ export class HiveClient {
 		evm?: Pick<EvmClient, "getBalance">;
 	}) { this.cache = new DemandCache(cache, 1_000); }
 
-	async account(pubkey: string): Promise<Record<string, unknown>> {
+	async account(pubkey: string, options: { forceRefresh?: boolean } = {}): Promise<Record<string, unknown>> {
 		if (!/^STM[1-9A-HJ-NP-Za-km-z]{48,52}$/.test(pubkey)) return { success: false, error: "Invalid Hive public key (expected STM-prefixed base58)" };
 		return this.cache.get({ namespace: "hive_account", key: pubkey, freshForMs: 8_000, staleForMs: 60_000, source: "hive-rpc" }, async () => {
 			const refs = await this.rpc("condenser_api.get_key_references", [[pubkey]]);
@@ -54,7 +54,7 @@ export class HiveClient {
 				rcPercent, rcCurrent, rcMax,
 				poweringDown, powerDownWeeklyHp: poweringDown ? hp(account.vesting_withdraw_rate) : "0.000",
 			} };
-		});
+		}, options);
 	}
 
 	async usernameAvailable(name: string): Promise<Record<string, unknown>> {
@@ -74,7 +74,7 @@ export class HiveClient {
 		return { success: true, refBlockNum: blockNumber & 0xffff, refBlockPrefix, expirationUnix, expirationIso: new Date(expirationUnix * 1000).toISOString().replace(".000Z", ""), chainId: CHAIN_ID, totalVestingFundHive: props.total_vesting_fund_hive, totalVestingShares: props.total_vesting_shares };
 	}
 
-	async history(account: string): Promise<Record<string, unknown>> {
+	async history(account: string, options: { forceRefresh?: boolean } = {}): Promise<Record<string, unknown>> {
 		const reason = usernameReason(account);
 		if (reason) throw new HiveError(`Invalid Hive account: ${reason}`, 400);
 		return this.cache.get({ namespace: "hive_history", key: account, freshForMs: 8_000, staleForMs: 60_000, source: "hive-rpc" }, async () => {
@@ -82,7 +82,7 @@ export class HiveClient {
 			const entries = Array.isArray(result?.history) ? result.history : [];
 			const transfers = entries.map((entry: unknown) => normalizeHistory(entry)).filter(Boolean).reverse();
 			return { success: true, account, transfers };
-		});
+		}, options);
 	}
 
 	async broadcast(body: Record<string, unknown>): Promise<Record<string, unknown>> {

@@ -145,6 +145,14 @@ export class UtxoClient {
 		return network;
 	}
 
+	/** NOWNodes Blockbook websocket endpoints follow the legacy provider map.
+	 * BCH has no working upstream websocket and stays on active polling. */
+	websocketEndpoint(networkValue: string): string | null {
+		const network = this.resolveNetwork(networkValue);
+		if (!["BTC", "LTC", "DOGE", "DASH", "DGB", "ZEC"].includes(network.symbol)) return null;
+		return `wss://${network.symbol.toLowerCase()}.nownodes.io/wss/${encodeURIComponent(this.options.apiKey)}/websocket`;
+	}
+
 	async getPubkeyInfo(networkValue: string, publicKey: string, options: { forceRefresh?: boolean } = {}): Promise<any> {
 		const network = this.resolveNetwork(networkValue);
 		const normalized = normalizeExtendedKeyVersion(publicKey);

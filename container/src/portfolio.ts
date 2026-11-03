@@ -162,7 +162,7 @@ export class PortfolioClient {
 				return;
 			}
 			try {
-				const result = await this.dependencies.hive.account(entry.pubkey) as any;
+				const result = await this.dependencies.hive.account(entry.pubkey, options) as any;
 				if (result?.success !== true) throw new Error(String(result?.error || "Hive account lookup failed"));
 				const account = objectValue(result.account);
 				const accountName = typeof account.name === "string" ? account.name : entry.pubkey;
@@ -209,7 +209,7 @@ export class PortfolioClient {
 				return;
 			}
 			try {
-				for (const raw of await this.dependencies.multichain.getBalances(entry.caip, entry.pubkey)) {
+				for (const raw of await this.dependencies.multichain.getBalances(entry.caip, entry.pubkey, options)) {
 					const item = this.makeBalance({ ...raw, fetchedAt, fetchedAtISO });
 					balances.set(balanceKey(item), item);
 				}
@@ -257,7 +257,7 @@ export class PortfolioClient {
 		if (this.dependencies.zerion) {
 			await Promise.all(evmAddresses.map(async (address) => {
 				try {
-					positionsByAddress.set(address, await this.dependencies.zerion!.getWalletPositions(address));
+					positionsByAddress.set(address, await this.dependencies.zerion!.getWalletPositions(address, options));
 				} catch {
 					// A direct native RPC fallback below preserves verified balances on
 					// supported networks without pretending token discovery succeeded.
@@ -315,7 +315,7 @@ export class PortfolioClient {
 				return;
 			}
 			try {
-				const direct = await this.dependencies.evm.getBalance(entry.networkId, address);
+				const direct = await this.dependencies.evm.getBalance(entry.networkId, address, options);
 				const balance = this.makeBalance({
 					...metadata,
 					caip: entry.caip,
@@ -341,7 +341,7 @@ export class PortfolioClient {
 					return;
 				}
 				try {
-					const direct = await this.dependencies.evm.getTokenBalance(contract.networkId, owner, contract.contractAddress);
+					const direct = await this.dependencies.evm.getTokenBalance(contract.networkId, owner, contract.contractAddress, options);
 					const existing = balances.get(`${caip}|${owner}`);
 					const amount = safeDecimal(direct.balance);
 					const price = existing ? Number(existing.priceUsd) : 0;

@@ -20,6 +20,9 @@ import { HiveClient, HiveError } from "./hive";
 import { VaultTelemetry } from "./telemetry";
 import { MultichainBroadcastClient, MultichainBroadcastError } from "./multichain-broadcast";
 import { RealtimeError, RealtimeHub } from "./realtime";
+import { RealtimeMonitor, scope as realtimeScope } from "./realtime-monitor";
+import { RealtimeStoreError } from "./realtime-store";
+import { timingSafeEqual } from "node:crypto";
 
 interface AppDependencies {
 	config: AppConfig;
@@ -40,6 +43,7 @@ interface AppDependencies {
 	telemetry?: VaultTelemetry;
 	multichainBroadcast?: MultichainBroadcastClient;
 	realtime?: RealtimeHub;
+	realtimeMonitor?: RealtimeMonitor;
 }
 
 class HttpError extends Error {
@@ -88,7 +92,7 @@ function queryBoolean(url: URL, name: string): boolean {
 	throw new HttpError(400, "invalid_query", `${name} must be true or false`);
 }
 
-export function createApp({ database, zerion, evm, market, utxo, portfolio, history, account, solana, catalog, quoteRouter, pendingSwaps, cosmosFeatures, hive, telemetry, multichainBroadcast, realtime }: AppDependencies): { fetch(request: Request): Promise<Response> } {
+export function createApp({ config, database, zerion, evm, market, utxo, portfolio, history, account, solana, catalog, quoteRouter, pendingSwaps, cosmosFeatures, hive, telemetry, multichainBroadcast, realtime, realtimeMonitor }: AppDependencies): { fetch(request: Request): Promise<Response> } {
 	return {
 		async fetch(request) {
 			const requestId = request.headers.get("x-request-id") || crypto.randomUUID();
@@ -96,6 +100,12 @@ export function createApp({ database, zerion, evm, market, utxo, portfolio, hist
 			const startedAt = performance.now();
 
 			try {
+				if (request.method === "POST" && url.pathname === "/api/v1/internal/realtime/tick") {
+					const secret = config.realtimeSchedulerSecret, supplied = request.headers.get("x-realtime-scheduler-secret") || "";
+					if (!secret || secret.length !== supplied.length || !timingSafeEqual(Buffer.from(secret), Buffer.from(supplied))) throw new HttpError(401, "unauthorized", "Scheduler authentication required");
+					if (!realtimeMonitor) throw new HttpError(503, "feature_unavailable", "Durable monitoring is unavailable");
+					return json(await realtimeMonitor.tick(), 200, requestId, { "Cache-Control": "no-store" });
+				}
 				if (request.method === "HEAD" && url.pathname === "/") return new Response(null, { status: 204 });
 				if (request.method === "GET" && url.pathname === "/spec/swagger.json") {
 					return json(openApiDocument(request.url), 200, requestId);
@@ -180,7 +190,25 @@ export function createApp({ database, zerion, evm, market, utxo, portfolio, hist
 					if (!realtime) throw new HttpError(503, "feature_unavailable", "Realtime events are unavailable");
 					const client = await authenticated();
 					const body = await bodyObject(request);
-					return realtime.createSse(client.id, body.addresses, body.events);
+					return realtime.createSse(client.id, body.addresses, body.events, { since: body.since, walletScope: typeof body.walletScope === "string" ? body.walletScope : undefined });
+				}
+				if (url.pathname === "/api/v1/events/watches" && request.method === "POST") {
+					const client = await authenticated();
+					if (!realtimeMonitor || !config.realtimeSchedulerSecret) throw new HttpError(503, "feature_unavailable", "Background monitoring is unavailable");
+					return json(await realtimeMonitor.register(client.id, await bodyObject(request)), 200, requestId, { "Cache-Control": "no-store" });
+				}
+				if (url.pathname === "/api/v1/events/replay" && request.method === "GET") {
+					const client = await authenticated();
+					if (!realtimeMonitor) throw new HttpError(503, "feature_unavailable", "Queued events are unavailable");
+					return json(await realtimeMonitor.store.replay(client.id, { walletScope: realtimeScope(url.searchParams.get("walletScope")),
+						after: url.searchParams.get("after") || undefined, limit: url.searchParams.has("limit") ? Number(url.searchParams.get("limit")) : 100 }), 200, requestId, { "Cache-Control": "no-store" });
+				}
+				if (url.pathname === "/api/v1/events/ack" && request.method === "POST") {
+					const client = await authenticated();
+					if (!realtimeMonitor) throw new HttpError(503, "feature_unavailable", "Queued events are unavailable");
+					const body = await bodyObject(request);
+					await realtimeMonitor.store.ack(client.id, { walletScope: realtimeScope(body.walletScope), eventIds: body.eventIds as string[] | undefined, cursor: body.cursor as string | number | undefined });
+					return json({ success: true }, 200, requestId, { "Cache-Control": "no-store" });
 				}
 
 				if (request.method === "POST" && url.pathname === "/api/v1/hive/create-account") {
@@ -281,9 +309,11 @@ export function createApp({ database, zerion, evm, market, utxo, portfolio, hist
 
 				if (request.method === "POST" && url.pathname === "/api/v1/portfolio/balances") {
 					if (!portfolio) throw new HttpError(503, "feature_unavailable", "Portfolio aggregation is not configured");
-					await authenticated();
+					const client = await authenticated();
 					const body = await bodyObject(request) as unknown as PortfolioRequest;
-					return json(await portfolio.getBalances(body, { forceRefresh: queryBoolean(url, "forceRefresh") }), 200, requestId, { "Cache-Control": "no-store" });
+					const balances = await portfolio.getBalances(body, { forceRefresh: queryBoolean(url, "forceRefresh") });
+					realtime?.rememberPortfolio(client.id, body.pubkeys);
+					return json(balances, 200, requestId, { "Cache-Control": "no-store" });
 				}
 
 				if (request.method === "POST" && url.pathname === "/api/v1/tx/history") {
@@ -441,6 +471,7 @@ export function createApp({ database, zerion, evm, market, utxo, portfolio, hist
 
 				throw new HttpError(404, "not_found", "Route not found");
 			} catch (error) {
+				if (error instanceof RealtimeStoreError) return json({ error: { code: "realtime_error", message: error.message } }, error.status, requestId);
 				if (error instanceof HttpError) return json({ error: { code: error.code, message: error.message } }, error.status, requestId);
 				if (error instanceof DisabledClientError) return json({ error: { code: "credential_disabled", message: error.message } }, 403, requestId);
 				if (error instanceof ZerionError) return json({ error: { code: "zerion_error", message: error.message } }, error.status >= 400 && error.status < 500 ? error.status : 502, requestId);

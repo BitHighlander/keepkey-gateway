@@ -175,12 +175,12 @@ export class EvmClient {
 		});
 	}
 
-	async getBalance(networkId: string, address: string): Promise<{ balance: string }> {
+	async getBalance(networkId: string, address: string, options: { forceRefresh?: boolean } = {}): Promise<{ balance: string }> {
 		const normalized = requireAddress(address, "wallet");
 		return this.cache.get({ namespace: "evm_balance", key: `${networkId}:${normalized}`, freshForMs: 8_000, staleForMs: 60_000, source: "nownodes" }, async () => {
 			const value = parseQuantity(await this.rpc(networkId, "eth_getBalance", [normalized, "latest"]), "balance");
 			return { balance: formatUnits(value, 18) };
-		});
+		}, options);
 	}
 
 	async getTokenDecimals(networkId: string, contractAddress: string): Promise<{ decimals: number }> {
@@ -192,7 +192,7 @@ export class EvmClient {
 		});
 	}
 
-	async getTokenBalance(networkId: string, address: string, contractAddress: string): Promise<{ balance: string }> {
+	async getTokenBalance(networkId: string, address: string, contractAddress: string, options: { forceRefresh?: boolean } = {}): Promise<{ balance: string }> {
 		const wallet = requireAddress(address, "wallet");
 		const contract = requireAddress(contractAddress, "contract");
 		return this.cache.get({ namespace: "evm_token_balance", key: `${networkId}:${wallet}:${contract}`, freshForMs: 8_000, staleForMs: 60_000, source: "nownodes" }, async () => {
@@ -201,7 +201,7 @@ export class EvmClient {
 				this.rpc(networkId, "eth_call", [{ to: contract, data: `0x70a08231${wallet.slice(2).padStart(64, "0")}` }, "latest"]),
 			]);
 			return { balance: formatUnits(parseQuantity(rawBalance, "token balance"), decimals) };
-		});
+		}, options);
 	}
 
 	async broadcast(networkId: string, rawTransaction: string): Promise<{ success: true; txid: string }> {
