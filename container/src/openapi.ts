@@ -182,7 +182,7 @@ export function openApiDocument(requestUrl: string): Record<string, unknown> {
 				post: {
 					operationId: "GetTransactionHistory",
 					security: [{ queryKey: [] }],
-					parameters: [{ name: "forceRefresh", in: "query", required: false, schema: { type: "boolean" } }],
+					parameters: [{ name: "forceRefresh", in: "query", required: false, description: "For UTXO histories, bypass history caches and stale fallback to observe new transactions and confirmations. Other providers retain their normal cache policy.", schema: { type: "boolean" } }],
 					requestBody: {
 						required: true,
 						content: { "application/json": { schema: {

@@ -290,7 +290,7 @@ export function createApp({ database, zerion, evm, market, utxo, portfolio, hist
 					if (!history) throw new HttpError(503, "feature_unavailable", "Transaction history is not configured");
 					await authenticated();
 					const body = await bodyObject(request) as unknown as HistoryRequest;
-					return json(await history.getTransactionHistory(body), 200, requestId, { "Cache-Control": "no-store" });
+					return json(await history.getTransactionHistory(body, { forceRefresh: queryBoolean(url, "forceRefresh") }), 200, requestId, { "Cache-Control": "no-store" });
 				}
 
 				const accountMatch = url.pathname.match(/^\/api\/v1\/getAccountInfo\/([^/]+)\/([^/]+)$/);
