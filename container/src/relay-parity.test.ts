@@ -33,6 +33,15 @@ function fixtureFetch(body: any, requests: any[] = []) {
 }
 
 describe("Relay cross-chain legacy parity", () => {
+  test("preserves whole-unit amounts for zero-decimal destination tokens", async () => {
+    const token = "eip155:1/erc20:0x1234567890123456789012345678901234567890";
+    const response = solQuote();
+    response.details.currencyOut = { amount: "123", minimumAmount: "120", currency: { chainId: 1, address: token.split("erc20:")[1], symbol: "WHOLE", decimals: 0 } };
+    const resolver = { known: () => true, resolve: async (caip: string) => ({ assetId: caip, chainId: caip.split("/")[0], symbol: caip === token ? "WHOLE" : "SOL", decimals: caip === token ? 0 : 9 }) };
+    const quote = await new RelayQuoteAdapter(fixtureFetch(response), { nownodesApiKey: "fixture", assetResolver: resolver }).quote({ ...baseRequest, buyAsset: token });
+    expect(quote.amountOut).toBe("123");
+    expect(quote.amountOutMin).toBe("120");
+  });
   test("SOL to ETH builds a fresh, bounded transaction with visible accounts and preserves fee units", async () => {
     const requests: any[] = [];
     const quote = await new RelayQuoteAdapter(fixtureFetch(solQuote(), requests), { nownodesApiKey: "fixture" }).quote(baseRequest);

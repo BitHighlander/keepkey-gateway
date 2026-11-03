@@ -75,7 +75,7 @@ all eligible fallback tiers fail, with individual attempts in the diagnostics.
 On each `master` push, [deployment CI](../.github/workflows/deploy.yml) installs
 the frozen lockfile, runs unit tests and both TypeScript checks, stamps the
 commit, deploys, and waits for that exact revision plus a healthy database.
-The next gate runs:
+The revision check allows ten minutes for the container rollout. The next gate runs:
 
 ```sh
 bun container/live/provider-parity.ts https://oracles.cc

@@ -99,6 +99,7 @@ function exactDecimalToUnits(amount: string, decimals: number): string {
 
 function unitsToDecimal(units: string, decimals: number): string {
 	const value = BigInt(units);
+	if (decimals === 0) return value.toString();
 	const padded = value.toString().padStart(decimals + 1, "0");
 	const whole = padded.slice(0, -decimals);
 	const fraction = padded.slice(-decimals).replace(/0+$/, "");
