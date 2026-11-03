@@ -37,6 +37,49 @@ describe("diverse direct swap routing", () => {
 		expect(quote.raw.fees.total_bps).toBe(150);
 	});
 
+	test("converts native precision to protocol units without changing the deposit amount", async () => {
+		const ltc = "bip122:12a765e31ffd4059bada1e25190f6e98/slip44:2";
+		const cacao = "cosmos:mayachain-mainnet-v1/slip44:931";
+		for (const fixture of [
+			{ provider: "thorchain" as const, asset: request.sellAsset, amount: "0.123456789123456789", units: "12345678", rounded: true, decimals: 18 },
+			{ provider: "thorchain" as const, asset: request.sellAsset, amount: "0.100000009999999999", units: "10000000", rounded: true, decimals: 18 },
+			{ provider: "mayachain" as const, asset: request.sellAsset, amount: "0.123456789123456789", units: "12345678", rounded: true, decimals: 18 },
+			{ provider: "thorchain" as const, asset: ltc, amount: "0.12345678", units: "12345678", rounded: false, decimals: 8 },
+			{ provider: "thorchain" as const, asset: request.buyAsset, amount: "1.234567", units: "123456700", rounded: false, decimals: 6 },
+			{ provider: "mayachain" as const, asset: cacao, amount: "1.1234567891", units: "11234567891", rounded: false, decimals: 10 },
+		]) {
+			let asked: URL | undefined;
+			const fetcher = async (url: string | URL | Request) => { asked = new URL(String(url)); return fixtureFetch(url); };
+			const quote = await new ProtocolQuoteAdapter(fixture.provider, fetcher as typeof fetch).quote({
+				...request, sellAsset: fixture.asset, sellAmount: fixture.amount, buyAsset: request.sellAsset,
+			});
+			expect(asked?.searchParams.get("amount")).toBe(fixture.units);
+			expect(quote.txs[0].txParams.amount).toBe(fixture.amount);
+			expect(quote.meta.inputPrecision).toMatchObject({ sourceDecimals: fixture.decimals, protocolBaseUnits: fixture.units, roundedDown: fixture.rounded });
+		}
+	});
+
+	test("quotes ETH to LTC at eight protocol decimals while retaining the full ETH input", async () => {
+		let quotedAmount = "";
+		const fetcher = async (url: string | URL | Request) => { quotedAmount = new URL(String(url)).searchParams.get("amount") || ""; return fixtureFetch(url); };
+		const amount = "0.032654987123456789";
+		const quote = await new ProtocolQuoteAdapter("thorchain", fetcher as typeof fetch).quote({ ...request, sellAmount: amount,
+			buyAsset: "bip122:12a765e31ffd4059bada1e25190f6e98/slip44:2", recipientAddress: "ltc1qfixture" });
+		expect(quotedAmount).toBe("3265498");
+		expect(quote.txs[0].txParams.amount).toBe(amount);
+		expect(quote.txs[0].txParams.memo).toStartWith("=:LTC.LTC:ltc1qfixture:");
+	});
+
+	test("rejects sub-unit quote dust and invalid source precision before calling a provider", async () => {
+		let calls = 0;
+		const fetcher = async (url: string | URL | Request) => { calls++; return fixtureFetch(url); };
+		const adapter = new ProtocolQuoteAdapter("thorchain", fetcher as typeof fetch);
+		await expect(adapter.quote({ ...request, sellAmount: "0.000000009999999999" })).rejects.toThrow("minimum 8-decimal quote unit");
+		await expect(adapter.quote({ ...request, sellAsset: "bip122:12a765e31ffd4059bada1e25190f6e98/slip44:2", sellAmount: "0.123456789" })).rejects.toThrow("8-decimal asset precision");
+		await expect(adapter.quote({ ...request, sellAsset: request.buyAsset, sellAmount: "1.2345678" })).rejects.toThrow("6-decimal asset precision");
+		expect(calls).toBe(0);
+	});
+
 	test("returns independent routes best-first and shares concurrent identical demand", async () => {
 		let calls = 0;
 		const counted = async (...args: Parameters<typeof fetch>) => { calls++; return fixtureFetch(args[0]); };
