@@ -185,4 +185,20 @@ export const migrations: readonly Migration[] = [
 			`CREATE INDEX IF NOT EXISTS realtime_events_expiry_idx ON realtime_events (expires_at)`,
 		],
 	},
+	{
+		version: 7,
+		name: "realtime_early_acknowledgements",
+		statements: [
+			`CREATE TABLE IF NOT EXISTS realtime_ack_receipts (
+				client_id uuid NOT NULL,
+				wallet_scope text NOT NULL,
+				event_id text NOT NULL,
+				acked_at timestamptz NOT NULL DEFAULT now(),
+				expires_at timestamptz NOT NULL DEFAULT now() + interval '7 days',
+				PRIMARY KEY (client_id, wallet_scope, event_id),
+				FOREIGN KEY (client_id, wallet_scope) REFERENCES realtime_wallets(client_id, wallet_scope) ON DELETE CASCADE
+			)`,
+			`CREATE INDEX IF NOT EXISTS realtime_ack_receipts_expiry_idx ON realtime_ack_receipts (expires_at)`,
+		],
+	},
 ];

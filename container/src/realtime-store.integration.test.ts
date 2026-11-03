@@ -82,7 +82,7 @@ describe('PostgreSQL durable realtime delivery', () => {
   await store.removeWallet(one, wallet, { revision: revision + 2 });
   expect((await store.replay(one, { walletScope: wallet })).events).toHaveLength(0);
   expect(await store.enqueueEvents([current])).toHaveLength(0);
-  await store.replaceWatches(one, wallet, [A], { enabled: true, revision: revision + 1 });
+  await expect(store.replaceWatches(one, wallet, [A], { enabled: true, revision: revision + 1 })).rejects.toMatchObject({ status: 409 });
   expect((await store.listActiveWatches()).some(watch => watch.clientId === one && watch.walletScope === wallet)).toBe(false);
  });
 
@@ -146,12 +146,100 @@ describe('PostgreSQL durable realtime delivery', () => {
  integration('opaque event cursors retain bigint precision beyond JavaScript safe integers', async () => {
   const id = await client(), wallet = scope();
   await store.replaceWatches(id, wallet, [A], { enabled: true });
-  await sql`SELECT setval(pg_get_serial_sequence('realtime_events', 'id'), 9007199254740992::bigint, true)`;
+  const sequence = await sql`SELECT setval(pg_get_serial_sequence('realtime_events', 'id'),
+   GREATEST(COALESCE((SELECT max(id) FROM realtime_events), 0), 9007199254740992::bigint), true)::text AS previous`;
+  const previous = sequence[0].previous, expected = (BigInt(previous) + 1n).toString();
   const events = await store.enqueueEvents([event(id, wallet, 'wide-cursor')]);
-  expect(events[0].id).toBe('9007199254740993');
-  const page = await store.replay(id, { walletScope: wallet, after: '9007199254740992' });
-  expect(page.cursor).toBe('9007199254740993');
+  expect(events[0].id).toBe(expected);
+  const page = await store.replay(id, { walletScope: wallet, after: previous });
+  expect(page.cursor).toBe(expected);
   await store.ack(id, { walletScope: wallet, cursor: page.cursor });
   expect((await store.replay(id, { walletScope: wallet })).events).toHaveLength(0);
+ });
+
+ integration('live acknowledgement before background insertion suppresses replay and publication without suppressing confirmation', async () => {
+  const id = await client(), wallet = scope();
+  await store.replaceWatches(id, wallet, [A], { enabled: true });
+  await store.ack(id, { walletScope: wallet, eventIds: ['live-pending'] });
+  expect(await store.enqueueEvents([event(id, wallet, 'live-pending')])).toHaveLength(0);
+  expect((await store.replay(id, { walletScope: wallet })).events).toHaveLength(0);
+  const rows = await sql`SELECT acked_at FROM realtime_events WHERE client_id = ${id} AND wallet_scope = ${wallet}`;
+  expect(rows).toHaveLength(1); expect(rows[0].acked_at).not.toBeNull();
+  const confirmed = await store.enqueueEvents([event(id, wallet, 'live-confirmed', true)]);
+  expect(confirmed.map(row => row.eventId)).toEqual(['live-confirmed']);
+  expect((await store.replay(id, { walletScope: wallet })).events.map(row => row.eventId)).toEqual(['live-confirmed']);
+ });
+
+ integration('concurrent live acknowledgement and enqueue leave no processed events replayable', async () => {
+  const id = await client(), wallet = scope(); await store.replaceWatches(id, wallet, [A], { enabled: true });
+  for (let i = 0; i < 12; i++) {
+   const eventId = `concurrent-${i}`, ack = () => store.ack(id, { walletScope: wallet, eventIds: [eventId] });
+   const enqueue = () => store.enqueueEvents([event(id, wallet, eventId)]);
+   await Promise.all(i % 2 ? [ack(), enqueue()] : [enqueue(), ack()]);
+  }
+  expect((await store.replay(id, { walletScope: wallet })).events).toHaveLength(0);
+  expect(await store.enqueueEvents([event(id, wallet, 'concurrent-0')])).toHaveLength(0);
+ });
+
+ integration('early receipts isolate clients and wallet scopes, including reversed multi-scope enqueue order', async () => {
+  const first = await client(), second = await client(), wallet = scope(), otherWallet = scope();
+  for (const [id, walletScope] of [[first, wallet], [first, otherWallet], [second, wallet]])
+   await store.replaceWatches(id, walletScope, [A], { enabled: true });
+  await store.ack(first, { walletScope: wallet, eventIds: ['same-live-id'] });
+  const values = [event(first, wallet, 'same-live-id'), event(first, otherWallet, 'same-live-id'), event(second, wallet, 'same-live-id')];
+  const results = await Promise.all([store.enqueueEvents(values), store.enqueueEvents([...values].reverse())]);
+  expect(results.flat()).toHaveLength(2);
+  expect((await store.replay(first, { walletScope: wallet })).events).toHaveLength(0);
+  expect((await store.replay(first, { walletScope: otherWallet })).events).toHaveLength(1);
+  expect((await store.replay(second, { walletScope: wallet })).events).toHaveLength(1);
+ });
+
+ integration('disable clears receipts and a late acknowledgement cannot restore forgotten scope data', async () => {
+  const id = await client(), wallet = scope(); await store.replaceWatches(id, wallet, [A], { enabled: true });
+  await store.ack(id, { walletScope: wallet, eventIds: ['before-disable'] });
+  await store.removeWallet(id, wallet);
+  await store.ack(id, { walletScope: wallet, eventIds: ['late-after-disable'] });
+  await store.ack(id, { walletScope: 'never-registered', eventIds: ['not-owned'] });
+  expect(await sql`SELECT event_id FROM realtime_ack_receipts WHERE client_id = ${id}`).toHaveLength(0);
+  expect(await store.enqueueEvents([event(id, wallet, 'late-after-disable')])).toHaveLength(0);
+  await store.replaceWatches(id, wallet, [A], { enabled: true });
+  expect(await store.enqueueEvents([event(id, wallet, 'before-disable'), event(id, wallet, 'late-after-disable')])).toHaveLength(2);
+ });
+
+ integration('expired early receipts are pruned and do not suppress a newly observed event', async () => {
+  const id = await client(), wallet = scope(); await store.replaceWatches(id, wallet, [A], { enabled: true });
+  await store.ack(id, { walletScope: wallet, eventIds: ['expired-early'] });
+  await sql`UPDATE realtime_ack_receipts SET expires_at = now() - interval '1 second' WHERE client_id = ${id}`;
+  expect(await store.prune()).toBeGreaterThanOrEqual(1);
+  expect(await store.enqueueEvents([event(id, wallet, 'expired-early')])).toHaveLength(1);
+ });
+
+ integration('cursor-only acknowledgement does not create a receipt or suppress future allocated rows', async () => {
+  const id = await client(), wallet = scope(); await store.replaceWatches(id, wallet, [A], { enabled: true });
+  await store.ack(id, { walletScope: wallet, cursor: '9223372036854775807' });
+  expect(await sql`SELECT event_id FROM realtime_ack_receipts WHERE client_id = ${id}`).toHaveLength(0);
+  expect(await store.enqueueEvents([event(id, wallet, 'allocated-after-cursor-ack')])).toHaveLength(1);
+  expect((await store.replay(id, { walletScope: wallet })).events).toHaveLength(1);
+ });
+
+ integration('replay defensively excludes an exact-ID receipt even if an old queue row lacks acked_at', async () => {
+  const id = await client(), wallet = scope(); await store.replaceWatches(id, wallet, [A], { enabled: true });
+  await store.enqueueEvents([event(id, wallet, 'legacy-null-ack')]);
+  await store.ack(id, { walletScope: wallet, eventIds: ['legacy-null-ack'] });
+  await sql`UPDATE realtime_events SET acked_at = NULL WHERE client_id = ${id} AND wallet_scope = ${wallet}`;
+  expect((await store.replay(id, { walletScope: wallet })).events).toHaveLength(0);
+ });
+
+ integration('stale conflicting registration fails while same-revision retries remain idempotent', async () => {
+  const id = await client(), wallet = scope(), revision = Date.now();
+  await store.replaceWatches(id, wallet, [A, B], { enabled: true, revision });
+  await store.replaceWatches(id, wallet, [B, A], { enabled: true, revision });
+  await expect(store.removeWallet(id, wallet, { revision: revision - 1 })).rejects.toMatchObject({ status: 409 });
+  await expect(store.replaceWatches(id, wallet, [A], { enabled: true, revision })).rejects.toMatchObject({ status: 409 });
+  expect((await store.listActiveWatches()).filter(watch => watch.clientId === id)).toHaveLength(2);
+  await store.removeWallet(id, wallet, { revision: revision + 1 });
+  await store.removeWallet(id, wallet, { revision: revision + 1 });
+  await expect(store.replaceWatches(id, wallet, [A, B], { enabled: true, revision })).rejects.toMatchObject({ status: 409 });
+  expect((await store.listActiveWatches()).filter(watch => watch.clientId === id)).toHaveLength(0);
  });
 });

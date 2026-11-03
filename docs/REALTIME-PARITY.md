@@ -50,6 +50,8 @@ watch list. Registrations and ordering revisions live in PostgreSQL. Closing SSE
 WebSocket or Vault does not remove durable watches. Posting `enabled: false`
 removes that scope's registrations and queued events. Generic balance queries,
 authentication and hidden-wallet streams cannot create durable registrations.
+Conflicting stale revisions return HTTP 409; retries requesting the same enabled
+state and watch set are idempotent, including after a scheduler-arm failure.
 
 A separate Cloudflare Durable Object alarm wakes the container after registration
 and runs a monitoring tick every 15 seconds while registrations remain. The tick
@@ -65,6 +67,15 @@ returns unacknowledged records with an opaque PostgreSQL cursor. `/events/ack`
 acknowledges only that client's scope. Clients acknowledge after successful scoped
 balance/history reconciliation, then persist that delivery cursor. This cursor is
 separate from the epoch-millisecond SSE catch-up cursor.
+
+An exact event-ID acknowledgement is retained for seven days even when the live
+stream delivered that event before the background monitor stored it. Later
+insertion preserves the acknowledgement and does not publish or replay that event
+again. Receipts are isolated by client and wallet scope and require an enabled
+registration; explicit disable removes them, and a late acknowledgement cannot
+restore a disabled scope. Cursor-only acknowledgement affects existing queue rows
+and does not acknowledge events allocated in the future. Delivery remains subject
+to retries; clients reconcile authoritative state before acknowledging.
 
 The seven days describe queue retention, not unlimited historical reconstruction.
 The scanner currently observes the latest provider history page (normally 50
