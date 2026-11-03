@@ -1,9 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { PersistentCache } from "./cache";
 import { normalizeExtendedKeyVersion, UtxoClient } from "./utxo";
-import { HDNodeWallet } from "ethers";
-import { base58check } from "@scure/base";
-import { createHash } from "node:crypto";
+import { LTC_SCRIPT_FIXTURES } from "../live/ltc-script-discovery";
 
 class TestCache implements PersistentCache {
 	private values = new Map<string, unknown>();
@@ -16,13 +14,6 @@ class TestCache implements PersistentCache {
 const NETWORK = { networkId: "bip122:test", symbol: "BTC", host: "blockbook.test" };
 const XPUB = "xpub-test-fixture";
 const TXID = "a".repeat(64);
-const publicKeyCodec = base58check(value => new Uint8Array(createHash("sha256").update(value).digest()));
-function publicFixtureKey(purpose: number, version: number): string {
-	const account = HDNodeWallet.fromSeed(new Uint8Array(32).fill(1)).derivePath(`m/${purpose}'/2'/0'`).neuter();
-	const payload = publicKeyCodec.decode(account.extendedKey);
-	new DataView(payload.buffer, payload.byteOffset, payload.length).setUint32(0, version);
-	return publicKeyCodec.encode(payload);
-}
 
 describe("UtxoClient", () => {
 	test("does not call Blockbook until requested", async () => {
@@ -41,8 +32,8 @@ describe("UtxoClient", () => {
 		const ltc = { networkId: "bip122:12a765e31ffd4059bada1e25190f6e98", symbol: "LTC", host: "blockbook.test" };
 		// Litecoin Blockbook maps Mtub -> BIP49/M-addresses and zpub -> BIP84/
 		// ltc1q. Bitcoin ypub on that node falls back to BIP44/L-addresses.
-		for (const [purpose, version] of [[49, 0x01b26ef6], [84, 0x04b24746]]) {
-			const fixture = publicFixtureKey(purpose, version), routes: string[] = [];
+		for (const { purpose, publicKey: fixture } of LTC_SCRIPT_FIXTURES.filter(fixture => fixture.purpose !== 44)) {
+			const routes: string[] = [];
 			expect(normalizeExtendedKeyVersion(fixture)).toBe(fixture);
 			const client = new UtxoClient({ apiKey: "test", cache: new TestCache(), networks: [ltc], fetch: (async input => {
 				const url = new URL(String(input)); routes.push(url.pathname);

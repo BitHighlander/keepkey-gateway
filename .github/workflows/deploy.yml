@@ -31,3 +31,5 @@ jobs:
         run: bun container/live/deploy-health.ts https://oracles.cc "$GITHUB_SHA"
       - name: Live provider parity
         run: bun container/live/provider-parity.ts https://oracles.cc
+      - name: Live Litecoin script discovery
+        run: bun container/live/ltc-script-discovery.ts https://oracles.cc
