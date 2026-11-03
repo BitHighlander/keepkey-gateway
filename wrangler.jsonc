@@ -16,6 +16,7 @@
   },
   "secrets": {
     "required": [
+      "REALTIME_SCHEDULER_SECRET",
       "DATABASE_URL",
       "ZERION_API_KEY",
       "NOWNODES_API_KEY",
@@ -37,10 +38,12 @@
   ],
   "durable_objects": {
     "bindings": [
-      { "name": "PIONEER_CONTAINER", "class_name": "PioneerContainer" }
+      { "name": "PIONEER_CONTAINER", "class_name": "PioneerContainer" },
+      { "name": "REALTIME_WATCHDOG", "class_name": "RealtimeWatchdog" }
     ]
   },
   "migrations": [
-    { "tag": "v1", "new_sqlite_classes": ["PioneerContainer"] }
+    { "tag": "v1", "new_sqlite_classes": ["PioneerContainer"] },
+    { "tag": "v2", "new_sqlite_classes": ["RealtimeWatchdog"] }
   ]
 }

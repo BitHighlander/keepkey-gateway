@@ -297,9 +297,15 @@ export class ZerionClient {
 		return request;
 	}
 
-	async getWalletPositions(address: string): Promise<ZerionWalletPosition[]> {
+	async getWalletPositions(address: string, options: { forceRefresh?: boolean } = {}): Promise<ZerionWalletPosition[]> {
 		if (!EVM_ADDRESS.test(address)) throw new ZerionError("Invalid EVM address", 400);
 		const key = address.toLowerCase();
+		const forced = this.walletInFlight.get(`force:${key}`);
+		if (forced) return forced;
+		if (options.forceRefresh) {
+			this.walletCache.delete(key);
+			return this.forceRead(this.walletInFlight, key, () => this.loadWalletPositions(key, true));
+		}
 		const cached = this.walletCache.get(key);
 		if (cached && cached.expiresAt > Date.now()) return cached.value;
 		const running = this.walletInFlight.get(key);
@@ -309,9 +315,15 @@ export class ZerionClient {
 		return request;
 	}
 
-	async getTransactions(address: string): Promise<ZerionTransaction[]> {
+	async getTransactions(address: string, options: { forceRefresh?: boolean } = {}): Promise<ZerionTransaction[]> {
 		if (!EVM_ADDRESS.test(address)) throw new ZerionError("Invalid EVM address", 400);
 		const key = address.toLowerCase();
+		const forced = this.transactionInFlight.get(`force:${key}`);
+		if (forced) return forced;
+		if (options.forceRefresh) {
+			this.transactionCache.delete(key);
+			return this.forceRead(this.transactionInFlight, key, () => this.loadTransactions(key, true));
+		}
 		const cached = this.transactionCache.get(key);
 		if (cached && cached.expiresAt > Date.now()) return cached.value;
 		const running = this.transactionInFlight.get(key);
@@ -321,8 +333,8 @@ export class ZerionClient {
 		return request;
 	}
 
-	private async loadTransactions(address: string): Promise<ZerionTransaction[]> {
-		const persisted = await this.persistentCache?.getFresh<ZerionTransaction[]>("zerion_transactions", address);
+	private async loadTransactions(address: string, forceRefresh = false): Promise<ZerionTransaction[]> {
+		const persisted = forceRefresh ? null : await this.persistentCache?.getFresh<ZerionTransaction[]>("zerion_transactions", address);
 		if (persisted) return this.rememberTransactions(address, persisted);
 		const chainNetworkIds = await this.getChainNetworkIds();
 		const chainIds = [...chainNetworkIds.entries()]
@@ -330,7 +342,7 @@ export class ZerionClient {
 			.map(([chainId]) => chainId)
 			.sort();
 		const fetchAndStore = async (): Promise<ZerionTransaction[]> => {
-			const afterLock = await this.persistentCache?.getFresh<ZerionTransaction[]>("zerion_transactions", address);
+			const afterLock = forceRefresh ? null : await this.persistentCache?.getFresh<ZerionTransaction[]>("zerion_transactions", address);
 			if (afterLock) return this.rememberTransactions(address, afterLock);
 			const params = new URLSearchParams({ currency: "usd", "page[size]": "50", "filter[trash]": "only_non_trash", "filter[chain_ids]": chainIds.join(",") });
 			const body = asObject(await this.request(`${this.baseUrl}/wallets/${address}/transactions/?${params}`));
@@ -343,6 +355,7 @@ export class ZerionClient {
 				? await this.persistentCache.runExclusive(`zerion:transactions:${address}`, fetchAndStore)
 				: await fetchAndStore();
 		} catch (error) {
+			if (forceRefresh) throw error;
 			const stale = await this.persistentCache?.getStale<ZerionTransaction[]>("zerion_transactions", address);
 			if (stale) return this.rememberTransactions(address, stale);
 			throw error;
@@ -360,8 +373,8 @@ export class ZerionClient {
 		return transactions;
 	}
 
-	private async loadWalletPositions(address: string): Promise<ZerionWalletPosition[]> {
-		const persisted = await this.persistentCache?.getFresh<ZerionWalletPosition[]>("zerion_wallet_positions", address);
+	private async loadWalletPositions(address: string, forceRefresh = false): Promise<ZerionWalletPosition[]> {
+		const persisted = forceRefresh ? null : await this.persistentCache?.getFresh<ZerionWalletPosition[]>("zerion_wallet_positions", address);
 		if (persisted) {
 			this.rememberWallet(address, persisted);
 			return persisted;
@@ -372,7 +385,7 @@ export class ZerionClient {
 			.map(([chainId]) => chainId)
 			.sort();
 		const fetchAndStore = async (): Promise<ZerionWalletPosition[]> => {
-			const afterLock = await this.persistentCache?.getFresh<ZerionWalletPosition[]>("zerion_wallet_positions", address);
+			const afterLock = forceRefresh ? null : await this.persistentCache?.getFresh<ZerionWalletPosition[]>("zerion_wallet_positions", address);
 			if (afterLock) {
 				this.rememberWallet(address, afterLock);
 				return afterLock;
@@ -389,10 +402,19 @@ export class ZerionClient {
 				? await this.persistentCache.runExclusive(`zerion:wallet:${address}`, fetchAndStore)
 				: await fetchAndStore();
 		} catch (error) {
+			if (forceRefresh) throw error;
 			const stale = await this.persistentCache?.getStale<ZerionWalletPosition[]>("zerion_wallet_positions", address);
 			if (stale) return stale;
 			throw error;
 		}
+	}
+
+	private forceRead<T>(running: Map<string, Promise<T>>, key: string, loader: () => Promise<T>): Promise<T> {
+		const prior = running.get(key);
+		const request = (async () => { if (prior) await prior.catch(() => undefined); return loader(); })()
+			.finally(() => running.delete(`force:${key}`));
+		running.set(`force:${key}`, request);
+		return request;
 	}
 
 	private rememberWallet(address: string, positions: ZerionWalletPosition[]): void {

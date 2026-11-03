@@ -14,11 +14,27 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    services:
+      realtime-postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: gateway_realtime_test
+          POSTGRES_PASSWORD: gateway_realtime_test
+          POSTGRES_DB: gateway_realtime_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U gateway_realtime_test -d gateway_realtime_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
       - run: bun install --frozen-lockfile
       - run: make test
+        env:
+          REALTIME_TEST_DATABASE_URL: postgres://gateway_realtime_test:gateway_realtime_test@127.0.0.1:5432/gateway_realtime_test
       - run: make typecheck
       - name: Stamp container revision
         run: |

@@ -31,7 +31,7 @@ export class ChainHistoryClient {
 		this.cache = new DemandCache(options.cache, 1_000);
 	}
 
-	async getTransactionHistory(caip: string, address: string, page = 1): Promise<Record<string, unknown>[]> {
+	async getTransactionHistory(caip: string, address: string, page = 1, options: { forceRefresh?: boolean } = {}): Promise<Record<string, unknown>[]> {
 		const networkId = caip.split("/")[0];
 		if (!address.trim() || address.length > 512) throw new ChainHistoryError("Invalid history address", 400);
 		return this.cache.get({ namespace: "chain_history_v2", key: `${networkId}:${address}:${page}`, freshForMs: 15_000, staleForMs: 5 * 60_000, source: "chain-history" }, async () => {
@@ -41,7 +41,7 @@ export class ChainHistoryClient {
 			if (networkId.startsWith("tron:")) return this.tron(networkId, address, page);
 			if (networkId.startsWith("ton:")) return this.ton(networkId, address, page);
 			throw new ChainHistoryError(`Unsupported transaction-history network: ${networkId}`, 422);
-		});
+		}, options);
 	}
 
 	private async cosmos(networkId: string, address: string, page: number): Promise<Record<string, unknown>[]> {

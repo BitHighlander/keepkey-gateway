@@ -285,3 +285,13 @@ describe("RPC quantity compatibility", () => {
 		await expect(client.readRpc("eip155:8453", "eth_simulateV1", [{ blockStateCalls: [] }, "latest"])).rejects.toMatchObject({ status: 422, message: "EVM node does not support eth_simulateV1 (HTTP 405)" });
 	});
 });
+
+test("forced post-payment EVM balance reads replace warm native balances", async () => {
+ const ADDRESS = "0x1111111111111111111111111111111111111111";
+ let amount = 1_000_000_000_000_000_000n;
+ const { client, requests } = fakeNode(method => method === "eth_getBalance" ? { result: `0x${amount.toString(16)}` } : { result: "0x0" });
+ expect(await client.getBalance("eip155:8453", ADDRESS)).toEqual({ balance: "1" });
+ const warmed = requests(); amount = 2_000_000_000_000_000_000n;
+ expect(await client.getBalance("eip155:8453", ADDRESS)).toEqual({ balance: "1" }); expect(requests()).toBe(warmed);
+ expect(await client.getBalance("eip155:8453", ADDRESS, { forceRefresh: true })).toEqual({ balance: "2" }); expect(requests()).toBe(warmed + 1);
+});

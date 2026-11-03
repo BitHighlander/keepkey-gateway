@@ -1,10 +1,13 @@
 import { Container, getContainer } from "@cloudflare/containers";
+import { DurableObject } from "cloudflare:workers";
 import { containerEnv, type ContainerRuntimeEnv } from "./container-env";
 import { MemoryRateLimiter, requestRateLimits } from "./rate-limit";
 import { publicOpenApiResponse } from "./public-openapi";
+import { armPaymentMonitor, runPaymentMonitor, changesDurablePaymentWatches, isInternalRealtimePath, type BackgroundTickResult } from "./realtime-scheduler";
 
 interface Env extends ContainerRuntimeEnv {
 	PIONEER_CONTAINER: DurableObjectNamespace<PioneerContainer>;
+	REALTIME_WATCHDOG: DurableObjectNamespace<RealtimeWatchdog>;
 }
 
 const MAIN_INSTANCE_ID = "pioneer-main-recovery-20261003";
@@ -23,6 +26,45 @@ export class PioneerContainer extends Container<Env> {
 	enableInternet = true;
 }
 
+async function readyContainer(env: Env) {
+	const container = getContainer(env.PIONEER_CONTAINER, MAIN_INSTANCE_ID);
+	await container.startAndWaitForPorts({
+		ports: [12000],
+		cancellationOptions: { instanceGetTimeoutMS: 120_000, portReadyTimeoutMS: 120_000, waitInterval: 500 },
+		startOptions: {
+			envVars: containerEnv(env), enableInternet: true,
+			labels: { service: "keepkey-gateway", instance: MAIN_INSTANCE_ID },
+		},
+	});
+	return container;
+}
+
+// Separate from the Container's own lifecycle alarms. This object survives all
+// client disconnects and wakes the container while durable wallet watches exist.
+export class RealtimeWatchdog extends DurableObject<Env> {
+	async arm(): Promise<void> { await armPaymentMonitor(this.ctx.storage); }
+
+	async alarm(): Promise<void> {
+		try {
+			const result = await runPaymentMonitor(this.ctx.storage, async () => {
+				if (!this.env.REALTIME_SCHEDULER_SECRET) throw new Error("Scheduler is not configured");
+				const container = await readyContainer(this.env);
+				const response = await container.fetch(new Request("http://container/api/v1/internal/realtime/tick", {
+					method: "POST", headers: { "x-realtime-scheduler-secret": this.env.REALTIME_SCHEDULER_SECRET },
+				}));
+				if (!response.ok) throw new Error(`Monitor returned HTTP ${response.status}`);
+				return await response.json() as BackgroundTickResult;
+			});
+			console.log(JSON.stringify({ event: "background_payment_monitor", ...result }));
+		} catch {
+			// A storage failure may precede re-arming. Preserve platform retries
+			// as well as the scheduled retry; both paths are idempotent.
+			console.error(JSON.stringify({ event: "background_payment_monitor", error: "tick_failed" }));
+			throw new Error("Background payment monitor tick failed");
+		}
+	}
+}
+
 export default {
 	async fetch(request: Request, env: Env): Promise<Response> {
 		const startedAt = performance.now();
@@ -33,6 +75,10 @@ export default {
 		let errorReason: string | undefined;
 		const requestId = request.headers.get("x-request-id") || crypto.randomUUID();
 		try {
+			if (isInternalRealtimePath(new URL(request.url).pathname)) {
+				status = 404;
+				return new Response("Not found", { status: 404 });
+			}
 			for (const limit of requestRateLimits(request)) {
 				const result = rateLimiter.take(limit.scope, limit.policy);
 				if (!result.allowed) {
@@ -44,23 +90,18 @@ export default {
 				}
 			}
 
-			const container = getContainer(env.PIONEER_CONTAINER, MAIN_INSTANCE_ID);
-			await container.startAndWaitForPorts({
-				ports: [12000],
-				cancellationOptions: {
-					instanceGetTimeoutMS: 120_000,
-					portReadyTimeoutMS: 120_000,
-					waitInterval: 500,
-				},
-				startOptions: {
-					envVars: containerEnv(env),
-					enableInternet: true,
-					labels: { service: "keepkey-gateway", instance: MAIN_INSTANCE_ID },
-				},
-			});
+			const container = await readyContainer(env);
 			startupMs = Math.round(performance.now() - startedAt);
 			const response = await publicOpenApiResponse(request, await container.fetch(request));
 			status = response.status;
+			if (response.ok && changesDurablePaymentWatches(request)) {
+				try {
+					await env.REALTIME_WATCHDOG.getByName(MAIN_INSTANCE_ID).arm();
+				} catch {
+					status = 503;
+					return Response.json({ error: { code: "realtime_unavailable", message: "Background monitoring could not be scheduled. Retry watch registration." } }, { status: 503 });
+				}
+			}
 			if (status >= 400 && response.headers.get("content-type")?.includes("application/json")) {
 				try {
 					const body = await response.clone().json() as { error?: { code?: unknown; message?: unknown } };

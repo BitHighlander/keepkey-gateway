@@ -1,103 +1,76 @@
-# Incoming payments and realtime parity scope
+# Payment monitoring
 
-Status: audited 2026-11-03; proposed work below is not implemented by the LTC
-balance correction. A manual balance refresh must return the correct funded
-balance independently of notifications. Fix and verify that path first.
+The gateway supports active connection watches and explicit durable registrations.
+Authentication by itself never creates a durable watch. Standard-wallet clients
+register background watches explicitly; hidden wallets use ephemeral streams only.
 
-## Verified production behavior
+## Active delivery
 
-The public-fixture probe completed at `2026-11-03T20:58:24.499Z` against
-`oracles.cc`, revision `102fe9588ee8e31a47cc9618ba4a60721347055a`:
+Authenticated SSE (`POST /api/v1/events/subscribe`) and Socket.IO `subscribe` use
+one connection-scoped watch hub. Each subscription contains at most 200 account
+keys or addresses. EVM addresses compare without case; base58 public keys and
+addresses retain case. Socket disconnect/unsubscribe removes its active lease.
 
-| Check | Result |
-| --- | --- |
-| `wss://oracles.cc/socket.io/?EIO=4&transport=websocket` | Engine.IO open, Socket.IO connect, authenticated successfully |
-| `POST /api/v1/events/subscribe`, registered key, public LTC address | HTTP 200, `text/event-stream`, `connected`, `watching: 1` |
-| Same SSE request without authentication | HTTP 401 |
-| Socket.IO `transport=polling` | HTTP 404; websocket transport must be selected explicitly |
+UTXO account keys expand through Blockbook into derived leaf addresses. While a
+consumer is connected, the gateway opens one lazy NOWNodes Blockbook websocket
+per watched UTXO network and subscribes to addresses and new blocks. Notifications
+map back to the original watched account key. Expansion is bounded to 500 leaves
+per network; unresolved or excess accounts retain polling fallback. Websocket
+connection or acknowledgement failure enables the same fallback. There are no
+upstream websockets without active leases.
 
-The probe registered an isolated API client, read no wallet credentials, and
-closed the fixture subscription immediately. It proves transport,
-authentication, and watch acceptance; it does not prove receipt of a newly
-funded transaction. Its sanitized report is
-`/private/tmp/gateway-realtime-readonly-probe.json` on the audit machine.
+Other networks and failed UTXO streams use active history polling at a 15-second
+cadence, plus provider request time. Healthy UTXO websocket watches skip periodic
+history reads except reconciliation and confirmation checks. Explicit fresh reads
+bypass gateway wallet/history caches and stale fallback; provider indexing can
+still lag the chain.
 
-Implementation references: [Socket.IO handler](../container/server.ts),
-[SSE endpoint](../container/src/http.ts), [shared event hub](../container/src/realtime.ts),
-[history normalization](../container/src/history.ts), and
-[Vault compatibility contract](./VAULT-PIONEER-CONTRACT.md#realtime-contract).
+Every connection receives `sync:required` on subscription and another coalesced
+hint after its first successful history baseline. Upstream registration/reconnect
+also requests reconciliation. This covers payments arriving between an earlier
+balance read and watch establishment. A `since` epoch cursor requests bounded
+first-snapshot catch-up, at most 24 hours. Notifications contain the original
+`watchAddress`, network, stable event ID and `refreshHint: true`; they do not assert
+unverified payment amounts, native assets or token credits.
 
-## Current limits
+Legacy auth/join clients can acquire active watches from their recent authenticated
+portfolio requests. Portfolio chunks merge into a bounded, ten-minute in-memory
+inventory. Explicit wallet leases supersede that inventory and block late merges;
+last explicit lease closure clears the implicit inventory. The active lease itself
+does not expire at ten minutes. `join` validates the supplied query key and any
+username and retains the JSON-string `subscribedToUsername` acknowledgement.
+Legacy `transaction:incoming` hints are emitted only to connections owning the
+matching watch. This compatibility inventory is never persisted as permission for
+background monitoring.
 
-Only the SSE endpoint creates address watches. WebSocket `authenticate` adds a
-sender but does not subscribe addresses. Socket events depend on an active SSE
-subscription belonging to the same registered client. The hub polls history;
-it does not maintain upstream Blockbook subscriptions or a durable Watchtower.
+## Monitoring with Vault closed
 
-An active watch polls immediately, establishes a baseline without replaying
-existing transactions, then waits 30 seconds. Quiet polls back off to 60, 120,
-and 300 seconds. LTC history comes from NowNodes Blockbook with a short demand
-cache and a first-page transaction limit. Closing the final SSE subscription
-stops polling and clears snapshots. Reconnects and container restarts have no
-replay cursor, and subscriptions do not survive them.
+`POST /api/v1/events/watches` registers a standard-wallet scope and an explicit
+watch list. Registrations and ordering revisions live in PostgreSQL. Closing SSE,
+WebSocket or Vault does not remove durable watches. Posting `enabled: false`
+removes that scope's registrations and queued events. Generic balance queries,
+authentication and hidden-wallet streams cannot create durable registrations.
 
-SSE emits `tx:incoming` and `tx:confirmed`. Socket.IO mirrors both as
-`transaction:incoming`; confirmations use `type: "confirmation_update"` and a
-synthetic count of one. New outgoing activity can also appear with
-`type: "outgoing"`. There are no balance-change events or portfolio-cache
-invalidations in this hub.
+A separate Cloudflare Durable Object alarm wakes the container after registration
+and runs a monitoring tick every 15 seconds while registrations remain. The tick
+endpoint is blocked publicly at the Worker and also authenticates a scheduler
+secret inside the container. It uses fresh provider histories, deduplicates watches
+and queues stable pending/confirmed transition IDs with client and wallet scope.
+Disabled clients and removed watches cannot receive newly queued events. No alarm
+or scanner continues after the last durable registration is removed.
 
-Payloads are insufficient as payment receipts: UTXO `value` can represent all
-transaction outputs rather than the watched wallet's credited outputs; EVM
-token history loses its token identity and the hub labels events with the
-network's native CAIP. Reorgs, replacements, failed transactions, real
-confirmation counts, and partial history failures need explicit handling.
-Until corrected, notifications should trigger a scoped authoritative refresh.
+Events are retained for seven days, including acknowledged IDs needed to suppress
+requeueing. `/events/replay` requires the authenticated client's wallet scope and
+returns unacknowledged records with an opaque PostgreSQL cursor. `/events/ack`
+acknowledges only that client's scope. Clients acknowledge after successful scoped
+balance/history reconciliation, then persist that delivery cursor. This cursor is
+separate from the epoch-millisecond SSE catch-up cursor.
 
-## Prioritized implementation
-
-1. **Correct balances and manual refresh.** Verify transparent LTC balance,
-   unconfirmed balance, UTXOs, history, and account totals for each supported
-   derivation/script family. Refresh must bypass stale balance data on request
-   and must surface provider failures rather than turn them into zero.
-2. **Reliable notifications while Vault is open.** Give SSE and WebSocket
-   explicit subscribe/unsubscribe operations backed by one shared watch set.
-   Watch the selected receive address and account, with a short receive-screen
-   interval and a bounded lease. Support reconnect catch-up and idempotent
-   events. A notification should invalidate and refresh only the affected
-   account's balances, UTXOs, history, and totals, with a small debounce. Reset
-   account/provider/device subscriptions when the wallet context changes.
-3. **Correct payment event data.** Preserve network, exact asset CAIP, integer
-   base units, decimals, credited output/account, direction, txid/output index,
-   status, actual confirmations, observed time, and a stable event identifier.
-   Handle unconfirmed, confirmed, failed/replaced/dropped, and reorg transitions.
-   Expose watch freshness/failure so a connected socket does not imply a
-   working chain indexer. Avoid duplicate events across SSE and sockets.
-4. **Durable Watchtower capability, separately scoped.** Add opt-in persistent
-   watch registrations, ownership/authentication rules, cursor-based replay,
-   delivery acknowledgements/retries, restart recovery, retention limits,
-   rate/cost budgets, and observability. Decide separately whether monitoring
-   and notifications should continue while Vault is closed. Keep ordinary
-   wallet subscriptions demand-driven; no permanent watchers are implied by
-   connecting a wallet.
-
-## Acceptance checks
-
-Use deterministic transaction/history fixtures first. Any new funded test is
-an explicit operator action; audit scripts must not sign or broadcast.
-
-| Scenario | Required result |
-| --- | --- |
-| Incoming transparent LTC across all three wallet script families | Test legacy P2PKH (`L…`), P2SH wrapped SegWit (`M…`, legacy `3…` where supported), and native SegWit (`ltc1…`). Correct account, receive/change paths, pending amount, confirmed amount, UTXOs, history, and portfolio totals agree with the chain. |
-| Receive screen already open when funding arrives | One incoming notification; the affected account refreshes automatically within the agreed receive-screen latency budget. Other accounts do not refetch unnecessarily. |
-| Funding arrives just before subscribe, during reconnect, or during a container restart | Catch-up finds it once; the baseline does not silently swallow a new payment. Existing history does not replay as a burst of new payments. |
-| Unconfirmed to confirmed | Pending funds appear with an unconfirmed state; confirmation updates spendable/confirmed balances and displays actual confirmation counts without a second incoming toast. |
-| Reorg, replacement, dropped transaction, or temporary indexer failure | Reverse/update the previous state, do not double-credit, and retain a visible last-good/degraded state rather than presenting failure as an empty wallet. |
-| Units and ownership | Example `0.02540134 LTC` remains exactly `2540134` base units at 8 decimals. Count only owned credited outputs; exclude another recipient's outputs and do not mislabel change or fees as income. Token events preserve their contract/mint and decimals. |
-| Multiple transports/accounts | Two SSE sessions plus a socket share upstream work and yield one user notification. A socket-only subscription works after phase 2. One client's watches/events never leak to another. |
-| Watch lifecycle | Closing Receive or changing account/provider/device removes the correct lease. The last disconnect stops upstream work; restart and reconnect behavior is documented and tested. |
-
-Release evidence must distinguish successful transport/authentication,
-deterministic event-transition tests, a verified manual refresh, and an actual
-incoming-payment observation. A green socket connection alone satisfies none
-of the funded-balance or receipt-delivery checks.
+The seven days describe queue retention, not unlimited historical reconstruction.
+The scanner currently observes the latest provider history page (normally 50
+transactions), with at most 200 normalized rows per watch per tick. Tick diagnostics
+report potentially truncated pages and missing confirmed timestamps. High-volume
+wallets or prolonged provider downtime can exceed that coverage; payment amounts
+remain authoritative only after wallet balance/history reconciliation. Pending
+transactions without a block timestamp are treated as newly observed hints, never
+as a proved credit.

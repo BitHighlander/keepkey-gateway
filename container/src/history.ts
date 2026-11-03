@@ -41,7 +41,7 @@ export class HistoryClient {
 		const evmTransactions = new Map<string, ReturnType<NonNullable<typeof this.dependencies.zerion>["getTransactions"]>>();
 		for (const address of evmAddresses) {
 			if (!this.dependencies.zerion) break;
-			const pending = this.dependencies.zerion.getTransactions(address);
+			const pending = this.dependencies.zerion.getTransactions(address, options);
 			pending.catch(() => {}); // Observed per query below; avoid an unhandled rejection meanwhile.
 			evmTransactions.set(address, pending);
 		}
@@ -75,16 +75,16 @@ export class HistoryClient {
 		}
 		if (query.networkId.startsWith("hive:")) {
 			if (!this.dependencies.hive) throw new HistoryError("Hive transaction history is not configured", 503);
-			const resolved = await this.dependencies.hive.account(query.pubkey) as any;
+			const resolved = await this.dependencies.hive.account(query.pubkey, options) as any;
 			if (resolved?.success !== true) throw new HistoryError(String(resolved?.error || "Hive account lookup failed"), 502);
 			if (resolved.noAccount) return [];
 			const accountName = String(resolved?.account?.name || "");
 			if (!accountName) throw new HistoryError("Hive account lookup returned no account name", 502);
-			const response = await this.dependencies.hive.history(accountName) as any;
+			const response = await this.dependencies.hive.history(accountName, options) as any;
 			return (Array.isArray(response?.transfers) ? response.transfers : []).map((transfer: any) => normalizeHiveHistory(accountName, query.networkId, transfer));
 		}
 		if (!this.dependencies.multichain) throw new HistoryError("Multichain transaction history is not configured", 503);
-		return (await this.dependencies.multichain.getTransactionHistory(query.caip, query.pubkey, page)).map((transaction) => ({ ...transaction, caip: query.caip }));
+		return (await this.dependencies.multichain.getTransactionHistory(query.caip, query.pubkey, page, options)).map((transaction) => ({ ...transaction, caip: query.caip }));
 	}
 
 	private validate(body: HistoryRequest): void {

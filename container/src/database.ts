@@ -3,6 +3,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import type { PersistentCache } from "./cache";
 import type { AppConfig } from "./config";
 import { migrations } from "./migrations";
+import { createRealtimeStore, type DurableRealtimeStore } from './realtime-store';
 
 export interface RegisterClientInput {
 	username: string;
@@ -27,6 +28,7 @@ export interface StoredPendingSwap {
 }
 
 export interface Database extends PersistentCache {
+	realtime?: DurableRealtimeStore;
 	migrate(): Promise<void>;
 	ping(): Promise<void>;
 	registerClient(input: RegisterClientInput): Promise<RegisteredClient>;
@@ -60,6 +62,7 @@ export function createDatabase(config: AppConfig): Database {
 	const cacheConnection = new AsyncLocalStorage<Awaited<ReturnType<typeof sql.reserve>>>();
 
 	return {
+		realtime: createRealtimeStore(sql),
 		async migrate() {
 			await sql`CREATE TABLE IF NOT EXISTS schema_migrations (
 				version integer PRIMARY KEY,

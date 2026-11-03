@@ -36,7 +36,7 @@ export class MultichainClient {
 		this.cache = new DemandCache(options.cache, 1_000);
 	}
 
-	async getBalances(caip: string, pubkey: string): Promise<MultichainBalance[]> {
+	async getBalances(caip: string, pubkey: string, options: { forceRefresh?: boolean } = {}): Promise<MultichainBalance[]> {
 		const networkId = caip.split("/")[0];
 		if (!pubkey.trim() || pubkey.length > 512) throw new MultichainError("Invalid wallet address", 400);
 		return this.cache.get({ namespace: "multichain_balances", key: `${caip}:${pubkey}`, freshForMs: 8_000, staleForMs: 60_000, source: "chain-rpc" }, async () => {
@@ -46,7 +46,7 @@ export class MultichainClient {
 			if (networkId.startsWith("tron:")) return this.tron(caip, pubkey);
 			if (networkId.startsWith("ton:")) return this.ton(caip, pubkey);
 			throw new MultichainError(`Unsupported portfolio network: ${networkId}`, 422);
-		});
+		}, options);
 	}
 
 	private async cosmos(caip: string, address: string, networkId: keyof typeof COSMOS): Promise<MultichainBalance[]> {
