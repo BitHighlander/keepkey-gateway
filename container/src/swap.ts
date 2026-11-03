@@ -5,6 +5,9 @@ import supportedChainsSnapshot from "../data/swap-supported-chains.json";
 import type { EvmClient } from "./evm";
 import type { SwapHealthObservation } from "./catalog";
 import { UniswapQuoteAdapter } from "./uniswap";
+import { NearIntentsQuoteAdapter } from "./near-intents";
+import { SwapAssetResolver } from "./swap-assets";
+import { validateSwapAddress } from "./swap-addresses";
 import {
 	AddressLookupTableAccount,
 	AddressLookupTableProgram,
@@ -29,6 +32,8 @@ export interface QuoteRequest {
 export interface QuoteAdapter {
 	readonly key: string;
 	readonly tier?: number;
+	/** Only adapters whose source transactions need no routing memo. */
+	readonly memoless?: boolean;
 	eligible(request: QuoteRequest): boolean;
 	quote(request: QuoteRequest): Promise<Record<string, any>>;
 }
@@ -146,6 +151,58 @@ function transactionType(caip: string): string {
 const RELAY_NETWORKS = new Set(supportedChainsSnapshot.relay.map((network) => network.toLowerCase()));
 const RELAY_APP_FEE_RECIPIENT = "0x87Ab2637bc4231604ad708c5e8aAC92A260c7704";
 const RELAY_APP_FEE_BPS = 30;
+const RELAY_SECOND_FEE_RECIPIENT = "0x21c9a94AF76B59b171b32fD125A4edF0e9A2Ad3e";
+const RELAY_SOLANA_NETWORK = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp";
+const RELAY_BITCOIN_NETWORK = "bip122:000000000019d6689c085ae165831e93";
+const RELAY_SOLANA_CHAIN_ID = 792703809;
+const RELAY_BITCOIN_CHAIN_ID = 8253038;
+
+type RelayQuoteOptions = {
+	nownodesApiKey?: string;
+	assetResolver?: { known(caip: string): boolean; resolve(caip: string): Promise<AssetRecord> };
+	feeBps?: number;
+	feeRecipients?: string[];
+};
+
+function relayChainNumber(caip: string): number | null {
+	const network = networkId(caip).toLowerCase();
+	if (network === RELAY_SOLANA_NETWORK.toLowerCase()) return RELAY_SOLANA_CHAIN_ID;
+	if (network === RELAY_BITCOIN_NETWORK) return RELAY_BITCOIN_CHAIN_ID;
+	const evm = evmChainNumber(caip);
+	return evm !== null && Number.isSafeInteger(evm) && evm > 0 ? evm : null;
+}
+
+function relayCurrencyAddress(caip: string): string | null {
+	if (networkId(caip).toLowerCase() === RELAY_SOLANA_NETWORK.toLowerCase()) {
+		const asset = caip.slice(caip.indexOf("/") + 1);
+		if (asset === "slip44:501") return "11111111111111111111111111111111";
+		if (asset.startsWith("token:")) {
+			try { return new PublicKey(asset.slice(6)).toBase58() === asset.slice(6) ? asset.slice(6) : null; } catch { return null; }
+		}
+		return null;
+	}
+	return evmCurrencyAddress(caip);
+}
+
+function relayCurrencyCaip(currency: any): string | undefined {
+	const chain = Number(currency?.chainId);
+	if (chain === RELAY_SOLANA_CHAIN_ID) return currency.address === "11111111111111111111111111111111"
+		? `${RELAY_SOLANA_NETWORK}/slip44:501` : `${RELAY_SOLANA_NETWORK}/token:${currency.address}`;
+	if (chain === RELAY_BITCOIN_CHAIN_ID) return `${RELAY_BITCOIN_NETWORK}/slip44:0`;
+	if (!Number.isSafeInteger(chain) || chain <= 0 || typeof currency?.address !== "string" || !/^0x[0-9a-f]{40}$/i.test(currency.address)) return undefined;
+	return /^0x0{40}$/i.test(currency.address)
+		? CHAINS[`eip155:${chain}`]?.nativeAssetCaip || `eip155:${chain}/slip44:60`
+		: `eip155:${chain}/erc20:${currency.address.toLowerCase()}`;
+}
+
+function relayFeeItem(kind: string, label: string, fee: any, bps?: number): Record<string, unknown> | undefined {
+	if (!fee || !/^\d+$/.test(String(fee.amount || "")) || BigInt(fee.amount) <= 0n) return undefined;
+	const assetCaip = relayCurrencyCaip(fee.currency);
+	const decimals = Number(fee.currency?.decimals);
+	if (!assetCaip || !Number.isInteger(decimals) || decimals < 0 || decimals > 255 || typeof fee.currency?.symbol !== "string") return undefined;
+	return { kind, label, assetCaip, symbol: fee.currency.symbol, decimals, amountBaseUnits: String(fee.amount), amount: unitsToDecimal(String(fee.amount), decimals), ...(bps !== undefined ? { bps } : {}) };
+}
+
 
 function evmChainNumber(caip: string): number | null {
 	const match = networkId(caip).match(/^eip155:(\d+)$/);
@@ -183,117 +240,120 @@ function validateRelaySolverDeposit(request: QuoteRequest, tx: any, amount: stri
 
 export class RelayQuoteAdapter implements QuoteAdapter {
 	readonly key = "relay";
-	constructor(private readonly fetcher: typeof fetch = fetch) {}
+	private readonly feeBps: number;
+	private readonly feeRecipients: string[];
+	constructor(private readonly fetcher: typeof fetch = fetch, private readonly options: RelayQuoteOptions = {}) {
+		this.feeBps = options.feeBps ?? RELAY_APP_FEE_BPS;
+		this.feeRecipients = options.feeRecipients ?? [RELAY_APP_FEE_RECIPIENT, RELAY_SECOND_FEE_RECIPIENT];
+		if (!Number.isInteger(this.feeBps) || this.feeBps < 0 || this.feeBps > 1000 || (this.feeBps > 0 && !this.feeRecipients.length)
+			|| this.feeRecipients.some(address => !/^0x[0-9a-f]{40}$/i.test(address))) throw new Error("Invalid Relay app fee configuration");
+	}
 
 	eligible(request: QuoteRequest): boolean {
-		return evmChainNumber(request.sellAsset) !== null
-			&& evmChainNumber(request.buyAsset) !== null
-			&& RELAY_NETWORKS.has(networkId(request.sellAsset).toLowerCase())
-			&& RELAY_NETWORKS.has(networkId(request.buyAsset).toLowerCase())
-			&& evmCurrencyAddress(request.sellAsset) !== null
-			&& evmCurrencyAddress(request.buyAsset) !== null
-			&& findAsset(request.sellAsset) !== undefined
-			&& findAsset(request.buyAsset) !== undefined;
+		const origin = relayChainNumber(request.sellAsset), destination = relayChainNumber(request.buyAsset);
+		const known = (caip: string) => this.options.assetResolver?.known(caip) ?? findAsset(caip) !== undefined;
+		return origin !== null && origin !== RELAY_BITCOIN_CHAIN_ID && destination !== null
+			&& relayCurrencyAddress(request.sellAsset) !== null
+			&& (relayCurrencyAddress(request.buyAsset) !== null || request.buyAsset === `${RELAY_BITCOIN_NETWORK}/slip44:0`)
+			&& known(request.sellAsset) && known(request.buyAsset);
 	}
 
 	async quote(request: QuoteRequest): Promise<Record<string, any>> {
 		if (!this.eligible(request)) throw new SwapError("Relay does not support this pair", 422);
-		const sell = findAsset(request.sellAsset)!;
-		const buy = findAsset(request.buyAsset)!;
-		const amount = exactDecimalToUnits(request.sellAmount, sell.decimals ?? 18);
-		const originChainId = evmChainNumber(request.sellAsset)!;
-		const destinationChainId = evmChainNumber(request.buyAsset)!;
+		const resolve = async (caip: string) => this.options.assetResolver ? this.options.assetResolver.resolve(caip) : findAsset(caip)!;
+		const [sell, buy] = await Promise.all([resolve(request.sellAsset), resolve(request.buyAsset)]);
+		if (!Number.isInteger(sell.decimals) || sell.decimals! < 0 || sell.decimals! > 255) throw new SwapError("Relay source precision is unknown", 422);
+		const amount = exactDecimalToUnits(request.sellAmount, sell.decimals!);
+		const originChainId = relayChainNumber(request.sellAsset)!;
+		const destinationChainId = relayChainNumber(request.buyAsset)!;
+		const originCurrency = relayCurrencyAddress(request.sellAsset)!;
+		let destinationCurrency = relayCurrencyAddress(request.buyAsset);
+		if (destinationChainId === RELAY_BITCOIN_CHAIN_ID) {
+			// Relay's native Bitcoin sentinel is reported by /chains, not an EVM zero address.
+			const response = await this.fetcher("https://api.relay.link/chains", { signal: AbortSignal.timeout(10_000) });
+			const body = await response.json().catch(() => null) as any;
+			destinationCurrency = (body?.chains || []).find((chain: any) => Number(chain.id) === RELAY_BITCOIN_CHAIN_ID)?.currency?.address;
+			if (!response.ok || typeof destinationCurrency !== "string" || !destinationCurrency) throw new SwapError("Relay Bitcoin currency metadata is unavailable");
+		}
+		const recipients = this.feeRecipients;
+		const each = Math.floor(this.feeBps / Math.max(1, recipients.length));
+		const remainder = this.feeBps - each * recipients.length;
+		const appFees = this.feeBps > 0 ? recipients.map((recipient, i) => ({ recipient, fee: String(each + (i === 0 ? remainder : 0)) })).filter(fee => Number(fee.fee) > 0) : [];
+		const solverMode = request.relayExecutionMode === "solver-deposit" && originChainId !== RELAY_SOLANA_CHAIN_ID;
 		const response = await this.fetcher("https://api.relay.link/quote", {
-			method: "POST",
-			headers: { Accept: "application/json", "Content-Type": "application/json" },
+			method: "POST", headers: { Accept: "application/json", "Content-Type": "application/json" },
 			body: JSON.stringify({
-				user: request.senderAddress,
-				originChainId,
-				destinationChainId,
-				originCurrency: evmCurrencyAddress(request.sellAsset),
-				destinationCurrency: evmCurrencyAddress(request.buyAsset),
-				amount,
-				recipient: request.recipientAddress,
-				refundTo: request.senderAddress,
-				tradeType: "EXACT_INPUT",
+				user: request.senderAddress, originChainId, destinationChainId, originCurrency, destinationCurrency, amount,
+				recipient: request.recipientAddress, refundTo: request.senderAddress, tradeType: "EXACT_INPUT",
 				slippageTolerance: String(Math.round(Number(request.slippage ?? 3) * 100)),
-				...(request.relayExecutionMode === "solver-deposit" ? { forceSolverExecution: true, explicitDeposit: true } : {}),
-				appFees: [{ recipient: RELAY_APP_FEE_RECIPIENT, fee: String(RELAY_APP_FEE_BPS) }],
-			}),
-			signal: AbortSignal.timeout(15_000),
+				...(solverMode ? { forceSolverExecution: true, explicitDeposit: true } : {}), ...(appFees.length ? { appFees } : {}),
+			}), signal: AbortSignal.timeout(20_000),
 		});
 		const raw = await response.json().catch(() => null) as any;
 		if (!response.ok) throw new SwapError(`Relay quote failed (${response.status}): ${raw?.message || raw?.error || "unknown error"}`, response.status === 400 ? 422 : 502);
+		const input = raw.details?.currencyIn;
+		if (input?.amount !== undefined && String(input.amount) !== amount) throw new SwapError("Relay source amount does not match the requested deposit", 422);
+		if (input?.currency?.chainId !== undefined && Number(input.currency.chainId) !== originChainId) throw new SwapError("Relay source chain does not match", 422);
+		if (input?.currency?.address !== undefined && !sameRelayCurrency(String(input.currency.address), originCurrency, originChainId)) throw new SwapError("Relay source currency does not match", 422);
 
-		const transactionItems = (raw.steps || [])
-			.filter((step: any) => !["approve", "approval"].includes(String(step.id || step.kind).toLowerCase()))
-			.flatMap((step: any) => step.items || [step])
-			.filter((item: any) => {
+		const transactionItems = (raw.steps || []).filter((step: any) => !["approve", "approval"].includes(String(step.id || step.kind).toLowerCase()))
+			.flatMap((step: any) => step.items || [step]).filter((item: any) => {
 				const data = item.data || item;
-				return typeof data.to === "string" && typeof data.data === "string";
+				return Array.isArray(data.instructions) || (typeof data.to === "string" && typeof data.data === "string");
 			});
-		if (request.relayExecutionMode === "solver-deposit" && transactionItems.length !== 1) throw new SwapError("Relay returned an unexpected solver transaction count");
+		if (transactionItems.length !== 1) throw new SwapError(solverMode ? "Relay returned an unexpected solver transaction count" : "Relay returned an unsupported source transaction count");
 		const txData = transactionItems[0]?.data || transactionItems[0];
-		if (!txData?.to || !txData?.data || txData.data.length < 10) throw new SwapError("Relay returned no executable EVM transaction");
-		if (request.relayExecutionMode === "solver-deposit") validateRelaySolverDeposit(request, txData, amount);
-
+		if (solverMode) validateRelaySolverDeposit(request, txData, amount);
+		if (txData.chainId !== undefined && Number(txData.chainId) !== originChainId) throw new SwapError("Relay transaction source chain does not match", 422);
+		if (txData.from !== undefined && !sameRelayCurrency(String(txData.from), request.senderAddress, originChainId)) throw new SwapError("Relay transaction sender does not match", 422);
+		let tx: Record<string, any>;
+		if (originChainId === RELAY_SOLANA_CHAIN_ID) {
+			const instructions = (txData.instructions || []).map((instruction: any) => {
+				const value = String(instruction.data || "");
+				let data: Buffer;
+				if (value.startsWith("0x") || /^[0-9a-f]+$/i.test(value)) {
+					const hex = value.replace(/^0x/, "");
+					if (hex.length % 2 || !/^[0-9a-f]*$/i.test(hex)) throw new SwapError("Relay returned invalid Solana instruction hex", 422);
+					data = Buffer.from(hex, "hex");
+				} else data = strictBase64(value, "Relay instruction data");
+				return { ...instruction, keys: instruction.keys || instruction.accounts, data: data.toString("base64") };
+			});
+			let serializedTx: string;
+			try { serializedTx = await assembleShapeShiftSolanaTransaction({ instructions, addressLookupTableAddresses: txData.addressLookupTableAddresses || [] }, request, this.fetcher, this.options.nownodesApiKey); }
+			catch (error) { throw new SwapError((error instanceof Error ? error.message : String(error)).replaceAll("ShapeShift", "Relay"), error instanceof SwapError ? error.status : 502); }
+			tx = { type: "SOLANA", chain: networkId(request.sellAsset), txParams: { senderAddress: request.senderAddress, recipientAddress: request.recipientAddress, serializedTx, amount: request.sellAmount } };
+		} else {
+			if (!txData?.to || !/^0x[0-9a-f]{40}$/i.test(txData.to) || !/^0x(?:[0-9a-f]{2}){4,}$/i.test(txData.data || "")) throw new SwapError("Relay returned no executable EVM transaction");
+			try { if (BigInt(txData.value || "0") !== (originCurrency === "0x0000000000000000000000000000000000000000" ? BigInt(amount) : 0n)) throw new Error(); }
+			catch { throw new SwapError("Relay transaction value does not match the requested source amount", 422); }
+			tx = { type: "EVM", chain: networkId(request.sellAsset), txParams: { to: txData.to, data: txData.data, value: String(txData.value || "0"), gasLimit: String(txData.gas || txData.gasLimit || ""), maxFeePerGas: txData.maxFeePerGas ? String(txData.maxFeePerGas) : undefined, maxPriorityFeePerGas: txData.maxPriorityFeePerGas ? String(txData.maxPriorityFeePerGas) : undefined, chainId: originChainId, recipientAddress: txData.to, senderAddress: request.senderAddress, amount: request.sellAmount } };
+		}
 		const currencyOut = raw.details?.currencyOut;
 		const outUnits = String(currencyOut?.amount || "");
 		if (!/^\d+$/.test(outUnits) || BigInt(outUnits) <= 0n) throw new SwapError("Relay returned no output amount");
+		if (currencyOut.currency?.chainId !== undefined && Number(currencyOut.currency.chainId) !== destinationChainId) throw new SwapError("Relay output chain does not match", 422);
+		if (currencyOut.currency?.address !== undefined && !sameRelayCurrency(String(currencyOut.currency.address), destinationCurrency!, destinationChainId)) throw new SwapError("Relay output currency does not match", 422);
 		const outputDecimals = Number(currencyOut?.currency?.decimals ?? buy.decimals);
-		if (!Number.isInteger(outputDecimals) || outputDecimals < 0 || outputDecimals > 255) throw new SwapError("Relay returned invalid output precision");
-		const minimumUnits = /^\d+$/.test(String(currencyOut?.minimumAmount || ""))
-			? String(currencyOut.minimumAmount)
-			: (BigInt(outUnits) * BigInt(Math.floor((100 - Number(request.slippage ?? 3)) * 100)) / 10_000n).toString();
+		if (!Number.isInteger(outputDecimals) || outputDecimals < 0 || outputDecimals > 255 || (buy.decimals !== undefined && outputDecimals !== buy.decimals)) throw new SwapError("Relay returned invalid output precision");
+		const minimumUnits = /^\d+$/.test(String(currencyOut?.minimumAmount || "")) ? String(currencyOut.minimumAmount) : (BigInt(outUnits) * BigInt(Math.floor((100 - Number(request.slippage ?? 3)) * 100)) / 10_000n).toString();
+		if (BigInt(minimumUnits) <= 0n || BigInt(minimumUnits) > BigInt(outUnits)) throw new SwapError("Relay returned invalid minimum output", 422);
 		const totalImpactPercent = Math.abs(Number(raw.details?.totalImpact?.percent));
-		const normalizedRaw = {
-			...raw,
-			fees: {
-				...(raw.fees || {}),
-				total_bps: RELAY_APP_FEE_BPS,
-				// Relay's gas amount is source-native base units, never destination
-				// token units. The wallet reserves source gas separately.
-				outbound: "0",
-				affiliate: String(raw.fees?.app?.amount || "0"),
-			},
-			total_swap_seconds: Number(raw.details?.timeEstimate || 0),
-		};
-
-		return {
-			id: crypto.randomUUID(),
-			source: "relay",
-			swapper: "Relay",
-			amountOut: unitsToDecimal(outUnits, outputDecimals),
-			amountOutMin: unitsToDecimal(minimumUnits, outputDecimals),
-			buyAmount: unitsToDecimal(outUnits, outputDecimals),
-			meta: { quoteMode: "RELAY_DIRECT", originChainId, destinationChainId,
-				...(request.relayExecutionMode === "solver-deposit" ? { executionMode: "solver-deposit" } : {}), feeBreakdown: {
-				integrator: { bps: RELAY_APP_FEE_BPS, recipient: RELAY_APP_FEE_RECIPIENT },
-				sourceNetwork: { amountBaseUnits: String(raw.fees?.gas?.amount || "0"), asset: CHAINS[networkId(request.sellAsset)]?.nativeAssetCaip },
-				...(Number.isFinite(totalImpactPercent) ? { priceImpactPercent: totalImpactPercent } : {}),
-			} },
-			txs: [{
-				type: "EVM",
-				chain: networkId(request.sellAsset),
-				txParams: {
-					to: txData.to,
-					data: txData.data,
-					value: String(txData.value || "0"),
-					gasLimit: String(txData.gas || txData.gasLimit || ""),
-					maxFeePerGas: txData.maxFeePerGas ? String(txData.maxFeePerGas) : undefined,
-					maxPriorityFeePerGas: txData.maxPriorityFeePerGas ? String(txData.maxPriorityFeePerGas) : undefined,
-					chainId: Number(txData.chainId || originChainId),
-					recipientAddress: txData.to,
-					senderAddress: request.senderAddress,
-					amount: request.sellAmount,
-				},
-			}],
-			complete: true,
-			steps: 1,
-			relayRequestId: raw.requestId,
-			raw: normalizedRaw,
-		};
+		const feeItems = [relayFeeItem("affiliate", "Relay partner fees", raw.fees?.app, this.feeBps), relayFeeItem("network", "Source network estimate", raw.fees?.gas), relayFeeItem("provider", "Relay service fee", raw.fees?.relayer)].filter(Boolean);
+		const affiliateItem = feeItems.find((item: any) => item.kind === "affiliate") as any;
+		const normalizedRaw = { ...raw, fees: { ...(raw.fees || {}), total_bps: this.feeBps, outbound: "0", affiliate: affiliateItem?.assetCaip.toLowerCase() === request.buyAsset.toLowerCase() ? affiliateItem.amount : "0", items: feeItems }, total_swap_seconds: Number(raw.details?.timeEstimate || 0) };
+		let relayRequestId = raw.requestId;
+		for (const step of raw.steps || []) {
+			if (relayRequestId) break;
+			relayRequestId = step.requestId || (step.items || []).map((item: any) => { try { return new URL(item.check?.endpoint, "https://api.relay.link").searchParams.get("requestId"); } catch { return null; } }).find(Boolean);
+		}
+		return { id: crypto.randomUUID(), source: "relay", swapper: "Relay", amountOut: unitsToDecimal(outUnits, outputDecimals), amountOutMin: unitsToDecimal(minimumUnits, outputDecimals), buyAmount: unitsToDecimal(outUnits, outputDecimals),
+			meta: { quoteMode: "RELAY_DIRECT", originChainId, destinationChainId, ...(solverMode ? { executionMode: "solver-deposit" } : {}), feeBreakdown: { integrator: { bps: this.feeBps, recipients: appFees.map(fee => ({ recipient: fee.recipient, bps: Number(fee.fee) })) }, sourceNetwork: { amountBaseUnits: String(raw.fees?.gas?.amount || "0"), asset: relayCurrencyCaip(raw.fees?.gas?.currency) || CHAINS[networkId(request.sellAsset)]?.nativeAssetCaip }, ...(Number.isFinite(totalImpactPercent) ? { priceImpactPercent: totalImpactPercent } : {}) } },
+			txs: [tx], complete: true, steps: 1, relayRequestId, raw: normalizedRaw };
 	}
+}
+
+function sameRelayCurrency(left: string, right: string, chain: number): boolean {
+	return chain === RELAY_SOLANA_CHAIN_ID || chain === RELAY_BITCOIN_CHAIN_ID ? left === right : left.toLowerCase() === right.toLowerCase();
 }
 
 const ZEROX_NETWORKS = new Set(supportedChainsSnapshot.zeroex.map((network) => network.toLowerCase()));
@@ -309,7 +369,7 @@ function zeroxTokenAddress(caip: string): string | null {
 
 export class ZeroXQuoteAdapter implements QuoteAdapter {
 	readonly key = "zeroex";
-	constructor(private readonly apiKey: string, private readonly fetcher: typeof fetch = fetch) {}
+	constructor(private readonly apiKey: string, private readonly fetcher: typeof fetch = fetch, private readonly assets = new SwapAssetResolver({fetch:fetcher})) {}
 
 	eligible(request: QuoteRequest): boolean {
 		const sellNetwork = networkId(request.sellAsset).toLowerCase();
@@ -317,14 +377,12 @@ export class ZeroXQuoteAdapter implements QuoteAdapter {
 			&& ZEROX_NETWORKS.has(sellNetwork)
 			&& zeroxTokenAddress(request.sellAsset) !== null
 			&& zeroxTokenAddress(request.buyAsset) !== null
-			&& findAsset(request.sellAsset) !== undefined
-			&& findAsset(request.buyAsset) !== undefined;
+			&& this.assets.known(request.sellAsset) && this.assets.known(request.buyAsset);
 	}
 
 	async quote(request: QuoteRequest): Promise<Record<string, any>> {
 		if (!this.eligible(request)) throw new SwapError("0x does not support this pair", 422);
-		const sell = findAsset(request.sellAsset)!;
-		const buy = findAsset(request.buyAsset)!;
+		const [sell,buy] = await Promise.all([this.assets.resolve(request.sellAsset),this.assets.resolve(request.buyAsset)]);
 		const chainId = evmChainNumber(request.sellAsset)!;
 		const params = new URLSearchParams({
 			chainId: String(chainId),
@@ -522,10 +580,10 @@ async function assembleShapeShiftSolanaTransaction(
 
 	let serialized: Uint8Array;
 	try {
-		const message = new TransactionMessage({ payerKey: payer, recentBlockhash: blockhash, instructions })
-			.compileToV0Message(lookupTableAccounts);
-		const transaction = new VersionedTransaction(message);
-		serialized = transaction.serialize();
+		const builder = new TransactionMessage({ payerKey: payer, recentBlockhash: blockhash, instructions });
+		try { serialized = new VersionedTransaction(builder.compileToV0Message([])).serialize(); }
+		catch { serialized = new VersionedTransaction(builder.compileToV0Message(lookupTableAccounts)).serialize(); }
+		if (serialized.length > MAX_SOLANA_WIRE_BYTES) serialized = new VersionedTransaction(builder.compileToV0Message(lookupTableAccounts)).serialize();
 	} catch (error) {
 		throw new SwapError(`ShapeShift Solana transaction could not be assembled: ${error instanceof Error ? error.message : String(error)}`, 422);
 	}
@@ -536,17 +594,16 @@ async function assembleShapeShiftSolanaTransaction(
 export class ShapeShiftQuoteAdapter implements QuoteAdapter {
 	readonly key = "shapeshift";
 	readonly tier = 1;
-	constructor(private readonly fetcher: typeof fetch = fetch, private readonly nownodesApiKey?: string) {}
+	readonly memoless = true;
+	constructor(private readonly fetcher: typeof fetch = fetch, private readonly nownodesApiKey?: string, private readonly assets = new SwapAssetResolver({fetch:fetcher,nownodesApiKey})) {}
 
 	eligible(request: QuoteRequest): boolean {
-		return findAsset(request.sellAsset) !== undefined
-			&& findAsset(request.buyAsset) !== undefined;
+		return this.assets.known(request.sellAsset) && this.assets.known(request.buyAsset);
 	}
 
 	async quote(request: QuoteRequest): Promise<Record<string, any>> {
 		if (!this.eligible(request)) throw new SwapError("ShapeShift fallback does not support this pair", 422);
-		const sell = findAsset(request.sellAsset)!;
-		const buy = findAsset(request.buyAsset)!;
+		const [sell,buy] = await Promise.all([this.assets.resolve(request.sellAsset),this.assets.resolve(request.buyAsset)]);
 		const sellAmount = exactDecimalToUnits(request.sellAmount, sell.decimals ?? 18);
 		const headers = { Accept: "application/json", "Content-Type": "application/json", "X-Partner-Code": SHAPESHIFT_PARTNER_CODE };
 		const rateParams = new URLSearchParams({ sellAssetId: request.sellAsset, buyAssetId: request.buyAsset, sellAmountCryptoBaseUnit: sellAmount });
@@ -767,7 +824,7 @@ export class ProtocolQuoteAdapter implements QuoteAdapter {
 	readonly key: ProviderKey;
 	private readonly fetcher: typeof fetch;
 
-	constructor(provider: ProviderKey, fetcher: typeof fetch = fetch) {
+	constructor(provider: ProviderKey, fetcher: typeof fetch = fetch, private readonly overrides: {affiliate?:string;affiliateBps?:number} = {}) {
 		this.key = provider;
 		this.fetcher = fetcher;
 	}
@@ -780,7 +837,8 @@ export class ProtocolQuoteAdapter implements QuoteAdapter {
 		const sell = protocolAsset(request.sellAsset, this.key);
 		const buy = protocolAsset(request.buyAsset, this.key);
 		if (!sell || !buy) throw new SwapError(`${this.key} does not support this pair`, 422);
-		const config = PROTOCOLS[this.key];
+		const config = {...PROTOCOLS[this.key],...this.overrides};
+		if (!Number.isInteger(config.affiliateBps) || config.affiliateBps<0 || config.affiliateBps>(this.key==='thorchain'?1000:500))throw new SwapError('Invalid protocol affiliate configuration',503);
 		// The source chain and protocol use different units: ETH deposits accept
 		// 18 decimals, while THORChain/Maya quotes normalize ETH to 8. Validate
 		// native precision first, then floor only the protocol quote quantity.
@@ -884,7 +942,7 @@ export class QuoteRouter {
 
 	async quote(request: QuoteRequest): Promise<any[]> {
 		validateQuoteRequest(request);
-		const eligible = this.adapters.filter((adapter) => adapter.eligible(request));
+		const eligible = this.adapters.filter((adapter) => (!request.memoless || adapter.memoless) && adapter.eligible(request));
 		if (eligible.length === 0) throw new SwapError("No swap provider supports this pair", 422);
 		const key = JSON.stringify(request);
 		const existing = this.inFlight.get(key);
@@ -904,6 +962,7 @@ export class QuoteRouter {
 			const settled = await Promise.allSettled(tierAdapters.map(async (adapter) => {
 				try {
 					let quote = await adapter.quote(request);
+					if (request.memoless && (quote.txs || []).some((tx: any) => tx.txParams?.memo || tx.memo)) throw new SwapError("Provider returned a memo for a memoless request",422);
 					if (this.options.validateQuote) quote = await this.options.validateQuote(request, quote);
 					const checkedAt = (this.options.now || Date.now)();
 					attempts.push({ provider: adapter.key, status: "ok", checkedAt });
@@ -952,23 +1011,35 @@ function validateQuoteRequest(request: QuoteRequest): void {
 	}
 	for (const [field, address] of [["recipientAddress", request.recipientAddress], ["senderAddress", request.senderAddress]] as const) {
 		if (/[:/&#?\s]/.test(address)) throw new SwapError(`${field} contains a forbidden delimiter`, 400);
+		const invalid = validateSwapAddress(field === "senderAddress" ? request.sellAsset : request.buyAsset,address);
+		if (invalid) throw new SwapError(`Invalid ${field}: ${invalid}`,400);
 	}
-	exactDecimalToUnits(request.sellAmount, 18);
+	// Validate the amount's syntax here; each adapter enforces its asset's
+	// precision. Native NEAR uses 24 decimals, so 18 is not a global limit.
+	exactDecimalToUnits(request.sellAmount, 255);
 	if (Number(request.sellAmount) > 1_000_000_000) throw new SwapError("sellAmount is unreasonably large", 400);
 	if (request.slippage !== undefined && (!Number.isFinite(request.slippage) || request.slippage <= 0 || request.slippage > 50)) {
 		throw new SwapError("slippage must be greater than 0 and at most 50 percent", 400);
 	}
 }
 
-export function createQuoteRouter(options: { fetch?: typeof fetch; zeroxApiKey?: string; swapkitApiKey?: string; nownodesApiKey?: string; evm?: Pick<EvmClient, "readRpc"> } = {}): QuoteRouter {
+export interface SwapProviderOptions {
+	near?: {apiKey?:string;feeRecipient?:string;feeBps?:number};
+	relay?: {feeBps?:number;feeRecipients?:string[]};
+	thorchain?: {affiliate?:string;affiliateBps?:number};
+	mayachain?: {affiliate?:string;affiliateBps?:number};
+}
+export function createQuoteRouter(options: SwapProviderOptions & { fetch?: typeof fetch; zeroxApiKey?: string; swapkitApiKey?: string; nownodesApiKey?: string; evm?: Pick<EvmClient, "readRpc"> } = {}): QuoteRouter {
 	const fetcher = options.fetch || fetch;
+	const assetResolver = new SwapAssetResolver({fetch:fetcher,evm:options.evm,nownodesApiKey:options.nownodesApiKey});
 	const adapters: QuoteAdapter[] = [
-		new ProtocolQuoteAdapter("thorchain", fetcher),
-		new ProtocolQuoteAdapter("mayachain", fetcher),
-		new RelayQuoteAdapter(fetcher),
-		new ShapeShiftQuoteAdapter(fetcher, options.nownodesApiKey),
+		new ProtocolQuoteAdapter("thorchain", fetcher,options.thorchain),
+		new ProtocolQuoteAdapter("mayachain", fetcher,options.mayachain),
+		new RelayQuoteAdapter(fetcher,{...options.relay,assetResolver,nownodesApiKey:options.nownodesApiKey}),
+		new NearIntentsQuoteAdapter(fetcher,options.near),
+		new ShapeShiftQuoteAdapter(fetcher, options.nownodesApiKey,assetResolver),
 	];
-	if (options.zeroxApiKey) adapters.push(new ZeroXQuoteAdapter(options.zeroxApiKey, fetcher));
+	if (options.zeroxApiKey) adapters.push(new ZeroXQuoteAdapter(options.zeroxApiKey, fetcher,assetResolver));
 	if (options.evm) adapters.push(new UniswapQuoteAdapter(options.evm));
 	if (options.swapkitApiKey) adapters.push(new SwapKitQuoteAdapter(options.swapkitApiKey, fetcher));
 	return new QuoteRouter(adapters, options.evm ? { validateQuote: (request, quote) => validateNativeEvmQuote(options.evm!, request, quote) } : {});

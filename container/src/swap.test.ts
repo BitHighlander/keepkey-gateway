@@ -119,7 +119,7 @@ describe("diverse direct swap routing", () => {
 			});
 		};
 		const quote = await new RelayQuoteAdapter(relayFetch as typeof fetch).quote(request);
-		expect(submitted.appFees).toEqual([{ recipient: "0x87Ab2637bc4231604ad708c5e8aAC92A260c7704", fee: "30" }]);
+		expect(submitted.appFees).toEqual([{ recipient: "0x87Ab2637bc4231604ad708c5e8aAC92A260c7704", fee: "15" }, { recipient: "0x21c9a94AF76B59b171b32fD125A4edF0e9A2Ad3e", fee: "15" }]);
 		expect(submitted.slippageTolerance).toBe("100");
 		expect(submitted.refundTo).toBe(request.senderAddress);
 		expect(quote.amountOut).toBe("24.43243");
@@ -136,7 +136,7 @@ describe("diverse direct swap routing", () => {
 			const fetcher = async (_url: any, init?: RequestInit) => {
 				submitted = JSON.parse(String(init?.body));
 				return Response.json({ steps: [{ items: [{ data: { to: "0x4cd00e387622c35bddb9b4c962c136462338bc31", data, value: "10000000000000000", chainId: 1 } }] }],
-					details: { currencyOut: { amount: "1000000", currency: { decimals: 6 } } } });
+					details: { currencyOut: { amount: "1000000", currency: { decimals: buyAsset.includes("erc20:") ? 6 : 18 } } } });
 			};
 			const recipientAddress = "0x2222222222222222222222222222222222222222";
 			const quote = await new RelayQuoteAdapter(fetcher as typeof fetch).quote({ ...request, buyAsset, recipientAddress, slippage: 0.5, relayExecutionMode: "solver-deposit" });

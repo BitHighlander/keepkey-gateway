@@ -1,4 +1,6 @@
+import type { SwapProviderOptions } from './swap';
 export interface AppConfig {
+	swapProviders?: SwapProviderOptions;
 	port: number;
 	databaseUrl: string;
 	databaseMaxConnections: number;
@@ -39,6 +41,7 @@ export function loadConfig(env: Environment = process.env): AppConfig {
 	}
 
 	return {
+		...(Object.keys(swapProviders(env)).length?{swapProviders:swapProviders(env)}:{}),
 		port: integer(env, "PORT", 12000, 1, 65535),
 		databaseUrl,
 		databaseMaxConnections: integer(env, "DATABASE_MAX_CONNECTIONS", 5, 1, 20),
@@ -51,4 +54,13 @@ export function loadConfig(env: Environment = process.env): AppConfig {
 		hiveSponsorAccount: env.HIVE_SPONSOR_ACCOUNT?.trim() || undefined,
 		hiveSponsorActiveWif: env.HIVE_SPONSOR_ACTIVE_WIF?.trim() || undefined,
 	};
+}
+
+function swapProviders(env:Environment):SwapProviderOptions {
+	const out:SwapProviderOptions={};
+	if(env.NEAR_API_SECRET || env.NEAR_AFFILIATE_RECIPIENT || env.NEAR_AFFILIATE_BPS!==undefined)out.near={
+		...(env.NEAR_API_SECRET?{apiKey:env.NEAR_API_SECRET.trim()}:{}),...(env.NEAR_AFFILIATE_RECIPIENT?{feeRecipient:env.NEAR_AFFILIATE_RECIPIENT.trim()}:{}),...(env.NEAR_AFFILIATE_BPS!==undefined?{feeBps:integer(env,'NEAR_AFFILIATE_BPS',30,0,450)}:{})};
+	if(env.RELAY_AFFILIATE_BPS!==undefined || env.RELAY_AFFILIATE_ADDRESS || env.RELAY_AFFILIATE_ADDRESS_2)out.relay={feeBps:integer(env,'RELAY_AFFILIATE_BPS',30,0,1000),feeRecipients:[env.RELAY_AFFILIATE_ADDRESS||'0x87Ab2637bc4231604ad708c5e8aAC92A260c7704',env.RELAY_AFFILIATE_ADDRESS_2||'0x21c9a94AF76B59b171b32fD125A4edF0e9A2Ad3e'].map(v=>v.trim()).filter(Boolean)};
+	for(const [provider,prefix,max] of [['thorchain','THORCHAIN',1000],['mayachain','MAYACHAIN',500]] as const)if(env[`${prefix}_AFFILIATE`] || env[`${prefix}_AFFILIATE_BPS`]!==undefined)out[provider]={affiliate:env[`${prefix}_AFFILIATE`]||'keep',affiliateBps:integer(env,`${prefix}_AFFILIATE_BPS`,30,0,max)};
+	return out;
 }

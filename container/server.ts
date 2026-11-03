@@ -56,7 +56,7 @@ const solana = config.nownodesApiKey
 	? new SolanaClient({ apiKey: config.nownodesApiKey })
 	: undefined;
 const catalog = new Catalog({ zeroxEnabled: Boolean(config.zeroxApiKey), swapkitEnabled: Boolean(config.swapkitApiKey), uniswapEnabled: Boolean(evm) });
-const quoteRouter = createQuoteRouter({ zeroxApiKey: config.zeroxApiKey, swapkitApiKey: config.swapkitApiKey, nownodesApiKey: config.nownodesApiKey, evm });
+const quoteRouter = createQuoteRouter({ ...config.swapProviders, zeroxApiKey: config.zeroxApiKey, swapkitApiKey: config.swapkitApiKey, nownodesApiKey: config.nownodesApiKey, evm });
 const pendingSwaps = new PendingSwapService(database, { evm });
 const cosmosFeatures = new CosmosFeatures(database);
 const telemetry = new VaultTelemetry(database);
@@ -121,7 +121,7 @@ console.log(JSON.stringify({
 	accountEnabled: Boolean(account),
 	solanaEnabled: Boolean(solana),
 	catalogEnabled: true,
-	quoteProviders: ["thorchain", "mayachain", "relay", "shapeshift", ...(config.zeroxApiKey ? ["zeroex"] : []), ...(config.swapkitApiKey ? ["swapkit-gated"] : [])],
+	quoteProviders: ["thorchain", "mayachain", "relay", "nearIntents", "shapeshift", ...(evm ? ["uniswap"]:[]), ...(config.zeroxApiKey ? ["zeroex"] : []), ...(config.swapkitApiKey ? ["swapkit-gated"] : [])],
 	pendingSwapsEnabled: true,
 	hiveEnabled: true,
 }));

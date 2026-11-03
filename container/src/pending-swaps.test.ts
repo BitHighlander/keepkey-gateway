@@ -276,3 +276,95 @@ describe("direct Uniswap payout tracking", () => {
    }
  });
 });
+
+
+describe("NEAR Intents bound settlement tracking", () => {
+ const ltc = "bip122:12a765e31ffd4059bada1e25190f6e98/slip44:2";
+ const depositAddress = "0x2222222222222222222222222222222222222222";
+ const recipient = "ltc1qw508d6qejxtdg4y5r3zarvary0c5xw7kgmn4n9";
+ const record = { ...valid, integration: "nearIntents", swapper: "NEAR Intents",
+  buyAsset: { ...valid.buyAsset, caip: ltc, networkId: ltc.split("/")[0], symbol: "LTC", address: recipient, amount: "0.42" },
+  quote: { id: "near-q", integration: "nearIntents", expectedAmountOut: "0.42", minimumAmountOut: "0.4" },
+  nearIntentsData: { depositAddress, refundTo: valid.sellAsset.address },
+ };
+ const execution = { status: "SUCCESS", correlationId: "registered-near-intent",
+  quoteResponse: { quoteRequest: { dry: false, depositMode: "SIMPLE", swapType: "EXACT_INPUT", depositType: "ORIGIN_CHAIN",
+   originAsset: "nep141:eth.omft.near", destinationAsset: "nep141:ltc.omft.near", amount: valid.sellAsset.amountBaseUnits,
+   refundType: "ORIGIN_CHAIN", refundTo: valid.sellAsset.address, recipientType: "DESTINATION_CHAIN", recipient },
+   quote: { depositAddress, amountIn: valid.sellAsset.amountBaseUnits, amountOut: "42000000", minAmountOut: "40000000" } },
+  swapDetails: { originChainTxHashes: [{ hash: valid.txHash }], destinationChainTxHashes: [{ hash: "a".repeat(64) }],
+   depositedAmount: valid.sellAsset.amountBaseUnits, amountOut: "41000000" },
+ };
+ async function setup(body: any = execution, input: any = record) {
+  let calls = 0;
+  const service = new PendingSwapService(fakeDatabase(), { initialGraceMs: 0, refreshIntervalMs: 0,
+   fetch: (async (url: string | URL | Request) => { calls++; expect(String(url)).toBe(`https://1click.chaindefuser.com/v0/status?depositAddress=${depositAddress}`); return Response.json(body); }) as typeof fetch });
+  await service.create("fixture", input);
+  return { service, calls: () => calls };
+ }
+ test("is demand-driven and records actual payout rather than the quoted amount", async () => {
+  const { service, calls } = await setup();
+  expect(calls()).toBe(0);
+  expect(await service.get("fixture", valid.txHash, true)).toMatchObject({ status: "completed", receivedOutput: "0.41", receivedOutputBaseUnits: "41000000", outboundTxid: "a".repeat(64), nearIntentsData: { nearStatus: "SUCCESS", refundTo: valid.sellAsset.address } });
+  await service.get("fixture", valid.txHash, true);
+  expect(calls()).toBe(1);
+ });
+ test("never treats a confirmed deposit or off-chain execution alone as completion", async () => {
+  for (const [state, expected] of [["PENDING_DEPOSIT", "pending"], ["KNOWN_DEPOSIT_TX", "confirming"], ["INCOMPLETE_DEPOSIT", "confirming"], ["PROCESSING", "swapping"]]) {
+   const body = structuredClone(execution); body.status = state; body.swapDetails.destinationChainTxHashes = [];
+   const { service } = await setup(body);
+   expect((await service.get("fixture", valid.txHash, true))?.status).toBe(expected);
+  }
+ });
+ test("rejects wrong refunds, off-chain payouts, swapped assets and deposit amounts", async () => {
+  for (const mutate of [
+   (b: any) => { b.quoteResponse.quoteRequest.refundTo = depositAddress; },
+   (b: any) => { b.quoteResponse.quoteRequest.refundType = "INTENTS"; },
+   (b: any) => { b.quoteResponse.quoteRequest.recipientType = "INTENTS"; },
+   (b: any) => { b.quoteResponse.quoteRequest.recipient = "other-recipient"; },
+   (b: any) => { b.quoteResponse.quoteRequest.originAsset = "nep141:base.omft.near"; },
+   (b: any) => { b.quoteResponse.quoteRequest.destinationAsset = "nep141:btc.omft.near"; },
+   (b: any) => { b.quoteResponse.quoteRequest.amount = "1"; },
+   (b: any) => { b.quoteResponse.quote.depositAddress = valid.sellAsset.address; },
+   (b: any) => { b.quoteResponse.quote.depositMemo = "tag-required"; },
+   (b: any) => { b.quoteResponse.quote.minAmountOut = "100"; },
+  ]) {
+   const body = structuredClone(execution); mutate(body);
+   const { service } = await setup(body);
+   expect(await service.get("fixture", valid.txHash, true)).toMatchObject({ status: "pending", providerCheck: { result: "unavailable" } });
+  }
+ });
+ test("rejects missing source hashes, payout hashes and actual minimum output evidence", async () => {
+  for (const mutate of [
+   (b: any) => { b.swapDetails.originChainTxHashes = [{ hash: "0xwrong-hash" }]; },
+   (b: any) => { b.swapDetails.destinationChainTxHashes = []; },
+   (b: any) => { b.swapDetails.destinationChainTxHashes = [{ hash: valid.txHash }]; },
+   (b: any) => { delete b.swapDetails.amountOut; },
+   (b: any) => { b.swapDetails.amountOut = "1"; },
+   (b: any) => { b.swapDetails.depositedAmount = "1"; },
+  ]) {
+   const body = structuredClone(execution); mutate(body);
+   const { service } = await setup(body);
+   expect(await service.get("fixture", valid.txHash, true)).toMatchObject({ status: "pending", providerCheck: { result: "unavailable" } });
+  }
+ });
+ test("uses origin-chain refund payout evidence and preserves incomplete refunds", async () => {
+  const body: any = structuredClone(execution); body.status = "REFUNDED";
+  body.swapDetails.refundedAmount = "9990000000000000";
+  body.swapDetails.destinationChainTxHashes = [];
+  const incomplete = await setup(body);
+  expect((await incomplete.service.get("fixture", valid.txHash, true))?.status).toBe("pending");
+  body.swapDetails.originChainTxHashes.push({ hash: "0xrefund-transaction" });
+  const complete = await setup(body);
+  expect(await complete.service.get("fixture", valid.txHash, true)).toMatchObject({ status: "refunded", refundTxid: "0xrefund-transaction", refundedAmountBaseUnits: "9990000000000000" });
+ });
+ test("does not guess the refund wallet for historical deposit-address-only records", async () => {
+  const { service, calls } = await setup(execution, { ...record, sellAsset: { ...record.sellAsset, address: depositAddress }, nearIntentsData: { depositAddress } });
+  expect(await service.get("fixture", valid.txHash, true)).toMatchObject({ status: "pending", providerCheck: { message: expect.stringContaining("source wallet refund address") } });
+  expect(calls()).toBe(0);
+ });
+ test("tracks the underlying NEAR route when ShapeShift supplied the quote", async () => {
+  const { service } = await setup(execution, { ...record, integration: "shapeshift", quote: { ...record.quote, integration: "shapeshift" } });
+  expect((await service.get("fixture", valid.txHash, true))?.status).toBe("completed");
+ });
+});

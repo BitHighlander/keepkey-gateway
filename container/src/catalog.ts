@@ -1,6 +1,7 @@
 import assetData from "../data/assets.json";
 import swapAssetsSnapshot from "../data/swap-assets.json";
 import supportedChainsSnapshot from "../data/swap-supported-chains.json";
+import { NATIVE_NEAR_ASSETS, NEAR_INTENTS_NETWORKS } from './near-intents';
 
 export interface DiscoveryAsset {
 	assetId: string;
@@ -72,17 +73,20 @@ export class Catalog {
 	}
 
 	availableSwapAssets(): typeof swapAssetsSnapshot {
-		return swapAssetsSnapshot;
+		const assets=[...swapAssetsSnapshot.data.assets];
+		for(const a of NATIVE_NEAR_ASSETS)if(!assets.some(row=>row.caip===a.caip || (row.isNative && row.networkId===a.networkId)))assets.push({caip:a.caip,asset:`${a.blockchain.toUpperCase()}.${a.symbol}`,chain:a.blockchain.toUpperCase(),symbol:a.symbol,name:a.symbol,networkId:a.networkId,isNative:true,icon:'',decimals:a.decimals});
+		return {...swapAssetsSnapshot,data:{...swapAssetsSnapshot.data,assets,total:assets.length,enabled:[...new Set([...swapAssetsSnapshot.data.enabled,...assets.map(a=>a.caip)])]}};
 	}
 
-	supportedChains(): typeof supportedChainsSnapshot {
-		return supportedChainsSnapshot;
+	supportedChains(): typeof supportedChainsSnapshot & {nearIntents:string[]} {
+		return {...supportedChainsSnapshot,nearIntents:[...NEAR_INTENTS_NETWORKS],relay:[...new Set([...supportedChainsSnapshot.relay,'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp'])]};
 	}
 
 	swapHealth(now = Date.now(), observations: readonly SwapHealthObservation[] = []): SwapHealth {
 		const result: SwapHealth = {
 			fetchedAt: now,
 			integrations: [
+				{key:'nearIntents',label:'NEAR Intents',status:'unknown',detail:'Direct 1Click provider; checked on quote demand with origin refunds and verified deposit terms'},
 				{ key: "thorchain", label: "THORChain", status: "unknown", detail: "Checked on quote demand; no background polling" },
 				{ key: "mayachain", label: "Mayachain", status: "unknown", detail: "Checked on quote demand; no background polling" },
 				{ key: "relay", label: "Relay", status: "unknown", detail: "Checked on quote demand; no background polling" },

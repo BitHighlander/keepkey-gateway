@@ -20,14 +20,15 @@ describe("pinned zero-upstream catalog", () => {
 		expect(catalog.search("", 50_000)).toHaveLength(2_000);
 	});
 
-	test("returns the pinned 23-asset swap contract", () => {
+	test("preserves pinned assets and adds native direct-provider coverage without startup traffic", () => {
 		const response = catalog.availableSwapAssets();
 		expect(response.success).toBe(true);
-		expect(response.data.total).toBe(23);
-		expect(response.data.assets).toHaveLength(23);
+		expect(response.data.total).toBe(response.data.assets.length);
+		expect(response.data.total).toBeGreaterThanOrEqual(23);
 		expect(response.data.assets).toContainEqual(expect.objectContaining({ asset: "BTC.BTC", decimals: 8 }));
 		expect(response.data.assets).toContainEqual(expect.objectContaining({ asset: "THOR.RUNE", decimals: 8 }));
 		expect(response.data.assets).toContainEqual(expect.objectContaining({ asset: "SOL.USDC", decimals: 6 }));
+		expect(response.data.assets).toContainEqual(expect.objectContaining({ networkId: "eip155:100", decimals: 18 }));
 	});
 
 	test("returns provider chain coverage from a local snapshot", () => {
@@ -38,12 +39,15 @@ describe("pinned zero-upstream catalog", () => {
 		expect(response.relay).toContain("eip155:999");
 		expect(response.shapeshift).toContain("eip155:4663");
 		expect(response.chainflip).toContain("bip122:000000000019d6689c085ae165831e93");
+		expect(response.nearIntents).toContain("bip122:12a765e31ffd4059bada1e25190f6e98");
+		expect(response.relay).toContain("solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp");
 	});
 
 	test("reports honest demand-tested health without provider polling", () => {
 		const response = catalog.swapHealth(1234);
 		expect(response.fetchedAt).toBe(1234);
-		expect(response.integrations).toHaveLength(8);
+		expect(response.integrations).toHaveLength(9);
+		expect(response.integrations.find(integration=>integration.key==='nearIntents')?.status).toBe('unknown');
 		expect(response.integrations.find((integration) => integration.key === "zeroex")?.status).toBe("disabled");
 		expect(response.integrations.find((integration) => integration.key === "swapkit")?.status).toBe("disabled");
 		const configured = new Catalog({ zeroxEnabled: true, swapkitEnabled: true }).swapHealth(1234);
