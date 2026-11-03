@@ -3,7 +3,9 @@ export {};
 
 const [origin, revision] = process.argv.slice(2);
 if (!origin || !/^[a-f0-9]{40}$/.test(revision || "")) throw new Error("Provide the API origin and full commit SHA");
-const deadline = Date.now() + 180_000;
+// A fresh Cloudflare container image can take several minutes to roll out.
+// Keep checking the exact revision throughout that rollout.
+const deadline = Date.now() + 600_000;
 while (Date.now() < deadline) {
 	try {
 		const response = await fetch(`${origin}/api/v1/health`, {
@@ -21,4 +23,4 @@ while (Date.now() < deadline) {
 	}
 	await Bun.sleep(3_000);
 }
-throw new Error(`Gateway revision ${revision} did not become healthy within three minutes`);
+throw new Error(`Gateway revision ${revision} did not become healthy within ten minutes`);

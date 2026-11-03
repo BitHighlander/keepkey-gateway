@@ -37,6 +37,11 @@ describe("loadConfig", () => {
 	test("fails fast without PostgreSQL", () => {
 		expect(() => loadConfig({})).toThrow("DATABASE_URL is required");
 	});
+	test('forwards legacy fee configuration and accepts explicitly disabled fees',()=>{
+		const config=loadConfig({DATABASE_URL:'postgres://pioneer:pioneer@localhost/pioneer',NEAR_AFFILIATE_BPS:'0',NEAR_API_SECRET:'fixture',RELAY_AFFILIATE_BPS:'31',THORCHAIN_AFFILIATE:'keep',THORCHAIN_AFFILIATE_BPS:'40'});
+		expect(config.swapProviders).toMatchObject({near:{feeBps:0,apiKey:'fixture'},relay:{feeBps:31,feeRecipients:['0x87Ab2637bc4231604ad708c5e8aAC92A260c7704','0x21c9a94AF76B59b171b32fD125A4edF0e9A2Ad3e']},thorchain:{affiliate:'keep',affiliateBps:40}});
+		expect(()=>loadConfig({DATABASE_URL:'postgres://p:p@localhost/p',NEAR_AFFILIATE_BPS:'bad'})).toThrow('NEAR_AFFILIATE_BPS');
+	});
 
 	test("rejects accidental non-PostgreSQL URLs", () => {
 		expect(() => loadConfig({ DATABASE_URL: "redis://localhost" })).toThrow("must use postgres");

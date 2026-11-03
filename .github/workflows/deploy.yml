@@ -29,3 +29,5 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: 53185d258559a5dae7d6fa6225cc46ba
       - name: Live health
         run: bun container/live/deploy-health.ts https://oracles.cc "$GITHUB_SHA"
+      - name: Live provider parity
+        run: bun container/live/provider-parity.ts https://oracles.cc

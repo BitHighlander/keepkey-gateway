@@ -1,6 +1,8 @@
 import type { Database, StoredPendingSwap } from "./database";
 import type { EvmClient } from "./evm";
 import { UNISWAP_EXECUTE, UNISWAP_ROUTER, UNISWAP_OUTPUTS } from "./uniswap";
+import { NATIVE_NEAR_ASSETS, NEAR_INTENTS_ORIGIN, nearAddressMatches, nearUnitsToDecimal } from "./near-intents";
+import { validateSwapAddress } from "./swap-addresses";
 
 export class PendingSwapError extends Error {
 	constructor(public readonly status: number, message: string) {
@@ -34,6 +36,8 @@ export class PendingSwapService {
 	private readonly fetcher: typeof fetch;
 	private readonly refreshIntervalMs: number;
 	private readonly initialGraceMs: number;
+	private nearTokens: any[] = [];
+	private nearTokensCheckedAt = 0;
 
 	constructor(private readonly database: Database, private readonly options: { fetch?: typeof fetch; refreshIntervalMs?: number; initialGraceMs?: number; evm?: Pick<EvmClient, "lookupTransaction" | "readRpc"> } = {}) {
 		this.fetcher = options.fetch || fetch;
@@ -60,8 +64,93 @@ export class PendingSwapService {
 		refreshed = await this.refreshMidgard(clientId, normalized, refreshed) || refreshed;
 		refreshed = await this.refreshRelay(clientId, normalized, refreshed) || refreshed;
 		refreshed = await this.refreshChainflip(clientId, normalized, refreshed) || refreshed;
+		refreshed = await this.refreshNearIntents(clientId, normalized, refreshed) || refreshed;
 		refreshed = await this.refreshUniswap(clientId, normalized, refreshed) || refreshed;
 		return response(refreshed || stored);
+	}
+
+	/** A source deposit is not a completed swap. Bind the registered intent to
+	 * both customer addresses/assets, then require a distinct settled payout and
+	 * the actual output amount before recording success. */
+	private async refreshNearIntents(clientId: string, txHash: string, stored: StoredPendingSwap): Promise<StoredPendingSwap | null> {
+		const route = `${stored.payload.integration || ""} ${stored.payload.swapper || ""}`.toLowerCase().replace(/[\s_-]/g, "");
+		if (!route.includes("nearintent")) return stored;
+		try {
+			const sell = objectOrEmpty(stored.payload.sellAsset), buy = objectOrEmpty(stored.payload.buyAsset);
+			const quote = objectOrEmpty(stored.payload.quote), raw = objectOrEmpty(quote.raw);
+			const normalized = objectOrEmpty(raw.quote || raw), meta = { ...objectOrEmpty(normalized.meta), ...objectOrEmpty(quote.meta) };
+			const near = objectOrEmpty(stored.payload.nearIntentsData);
+			const depositAddress = String(near.depositAddress || meta.depositAddress || normalized.inbound_address || "");
+			const refundTo = String(near.refundTo || meta.refundTo || sell.address || ""), recipient = String(buy.address || "");
+			if (!depositAddress || !refundTo || !recipient || validateSwapAddress(String(sell.caip), depositAddress)
+				|| validateSwapAddress(String(sell.caip), refundTo) || validateSwapAddress(String(buy.caip), recipient)) throw new Error("NEAR tracking is missing valid customer or deposit addresses");
+			// Old clients sent the deposit address as sellAsset.address. That cannot
+			// establish the customer's refund address; never infer one from it.
+			if (nearAddressMatches(String(sell.caip), depositAddress, refundTo)) throw new Error("NEAR tracking is missing the source wallet refund address");
+			const body = await fetchJson(this.fetcher, `${NEAR_INTENTS_ORIGIN}/v0/status?depositAddress=${encodeURIComponent(depositAddress)}`, {}, "NEAR Intents");
+			const registered = body?.quoteResponse, echo = registered?.quoteRequest, terms = registered?.quote;
+			const resolve = async (caip: string) => {
+				const network = caip.split("/")[0], asset = caip.split("/")[1];
+				const native = NATIVE_NEAR_ASSETS.find(a => a.caip.toLowerCase() === caip.toLowerCase()
+					|| (a.networkId === network && asset === "slip44:60" && ["eip155:56", "eip155:137", "eip155:43114"].includes(network)));
+				if (native) return native;
+				if (!this.nearTokensCheckedAt || Date.now() - this.nearTokensCheckedAt > 5 * 60_000) {
+					const registry = await fetchJson(this.fetcher, `${NEAR_INTENTS_ORIGIN}/v0/tokens`, {}, "NEAR Intents");
+					if (!Array.isArray(registry)) throw new Error("NEAR token registry is invalid");
+					this.nearTokens = registry;
+					this.nearTokensCheckedAt = Date.now();
+				}
+				const blockchain = NATIVE_NEAR_ASSETS.find(a => a.networkId === network)?.blockchain;
+				const contract = asset?.replace(/^(?:erc20|token):/, "");
+				const token = this.nearTokens.find(t => t.blockchain === blockchain && typeof t.contractAddress === "string"
+					&& (network.startsWith("eip155:") ? t.contractAddress.toLowerCase() === contract?.toLowerCase() : t.contractAddress === contract));
+				if (!token || typeof token.assetId !== "string" || !Number.isInteger(token.decimals) || token.decimals < 0 || token.decimals > 255) throw new Error("NEAR tracking asset is absent from the token registry");
+				return token as { assetId: string; decimals: number };
+			};
+			const source = await resolve(String(sell.caip)), destination = await resolve(String(buy.caip));
+			const amount = nearDecimalUnits(String(sell.amount), source.decimals);
+			const minimum = nearDecimalUnits(String(near.minimumAmountOut || quote.minimumAmountOut || normalized.amountOutMin || ""), destination.decimals);
+			if (!echo || !terms || echo.dry !== false || echo.swapType !== "EXACT_INPUT" || echo.depositType !== "ORIGIN_CHAIN" || echo.depositMode !== "SIMPLE"
+				|| echo.refundType !== "ORIGIN_CHAIN" || echo.recipientType !== "DESTINATION_CHAIN"
+				|| echo.originAsset !== source.assetId || echo.destinationAsset !== destination.assetId || echo.amount !== amount.toString()
+				|| !nearAddressMatches(String(sell.caip), String(echo.refundTo), refundTo) || !nearAddressMatches(String(buy.caip), String(echo.recipient), recipient)
+				|| !nearAddressMatches(String(sell.caip), String(terms.depositAddress), depositAddress) || terms.amountIn !== amount.toString()
+				|| (terms.depositMemo != null && terms.depositMemo !== "") || nearPositiveUnits(terms.minAmountOut) < minimum) throw new Error("NEAR status does not match this swap's assets, deposit, minimum or customer addresses");
+			const state = String(body.status || "").toUpperCase(), details = body.swapDetails || {};
+			const origins = nearHashList(details.originChainTxHashes), outputs = nearHashList(details.destinationChainTxHashes);
+			const sourceKnown = origins.some(hash => nearHashMatches(String(sell.networkId), hash, txHash));
+			const outbound = outputs.find(hash => !nearHashMatches(String(sell.networkId), hash, txHash));
+			const refund = origins.find(hash => !nearHashMatches(String(sell.networkId), hash, txHash));
+			let status = stored.status;
+			if (state === "SUCCESS") {
+				if (!sourceKnown || !outbound || nearPositiveUnits(details.depositedAmount) < amount
+					|| nearPositiveUnits(details.amountOut) < minimum || nearPositiveUnits(details.amountOut) < nearPositiveUnits(terms.minAmountOut)) throw new Error("NEAR completion has no bound deposit and confirmed minimum payout");
+				status = "completed";
+			} else if (state === "REFUNDED") {
+				if (!sourceKnown || !refund || nearPositiveUnits(details.refundedAmount) <= 0n) throw new Error("NEAR refund has no bound deposit and refund payout");
+				status = "refunded";
+			} else if (state === "FAILED") {
+				// A provider error before recognizing our transaction cannot prove
+				// that the broadcast deposit has failed or that funds were returned.
+				if (!sourceKnown) throw new Error("NEAR has not identified this source transaction");
+				status = "failed";
+			} else if (["PROCESSING", "KNOWN_DEPOSIT_TX", "INCOMPLETE_DEPOSIT"].includes(state)) {
+				status = state === "PROCESSING" && sourceKnown ? "swapping" : "confirming";
+			} else if (state !== "PENDING_DEPOSIT") throw new Error("NEAR returned an unknown execution status");
+			return await this.database.updatePendingSwap(clientId, txHash, status, {
+				...(sourceKnown ? { confirmations: 1, requiredConfirmations: 1 } : {}),
+				...(status === "completed" ? { outboundTxid: outbound, outboundTxHash: outbound, outboundConfirmations: 1, outboundRequiredConfirmations: 1,
+					receivedOutputBaseUnits: details.amountOut, receivedOutput: nearUnitsToDecimal(details.amountOut, destination.decimals), completedAt: new Date().toISOString() } : {}),
+				...(status === "refunded" ? { refundTxid: refund, refundReason: details.refundReason || "NEAR Intents returned the deposit", refundedAmountBaseUnits: details.refundedAmount } : {}),
+				...(status === "failed" ? { error: { provider: "near-intents", message: details.refundReason || "NEAR Intents reports execution failed" } } : {}),
+				nearIntentsData: { ...near, depositAddress, refundTo, originAsset: source.assetId, destinationAsset: destination.assetId,
+					sourceDecimals: source.decimals, destinationDecimals: destination.decimals, nearStatus: state, correlationId: body.correlationId,
+					originChainTxHashes: origins, destinationChainTxHashes: outputs },
+				providerCheck: { provider: "near-intents", result: state },
+			});
+		} catch (error) {
+			return await this.database.updatePendingSwap(clientId, txHash, stored.status, { providerCheck: { provider: "near-intents", result: "unavailable", message: error instanceof Error ? error.message : String(error) } });
+		}
 	}
 
 	/** A direct atomic swap is complete only after the source receipt contains
@@ -395,6 +484,27 @@ function relayTrackingStatus(raw: string, current: string): string {
 
 function objectOrEmpty(raw: unknown): Record<string, unknown> {
 	return raw && typeof raw === "object" && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
+}
+
+function nearPositiveUnits(raw: unknown): bigint {
+	if (typeof raw !== "string" || !/^[0-9]+$/.test(raw) || BigInt(raw) <= 0n) throw new Error("NEAR is missing a positive settlement amount");
+	return BigInt(raw);
+}
+
+function nearDecimalUnits(raw: string, decimals: number): bigint {
+	if (!/^(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$/.test(raw)) throw new Error("NEAR tracking is missing an exact asset amount");
+	const [whole, fraction = ""] = raw.split(".");
+	if (/[1-9]/.test(fraction.slice(decimals))) throw new Error("NEAR tracking amount exceeds asset precision");
+	return nearPositiveUnits(`${whole}${fraction.slice(0, decimals).padEnd(decimals, "0")}`);
+}
+
+function nearHashList(raw: unknown): string[] {
+	return Array.isArray(raw) ? raw.flatMap(item => typeof item?.hash === "string" && item.hash.length >= 8 && !/\s/.test(item.hash) ? [item.hash] : []) : [];
+}
+
+function nearHashMatches(network: string, left: string, right: string): boolean {
+	return /^(?:eip155:|bip122:|tron:|ripple:)/.test(network)
+		? left.replace(/^0x/i, "").toLowerCase() === right.replace(/^0x/i, "").toLowerCase() : left === right;
 }
 
 function isShapeShift(payload: Record<string, unknown>): boolean {
