@@ -445,7 +445,7 @@ export function createApp({ database, zerion, evm, market, utxo, portfolio, hist
 				if (error instanceof ChainHistoryError) return json({ error: { code: "history_error", message: error.message } }, error.status, requestId);
 				if (error instanceof AccountError) return json({ error: { code: "account_error", message: error.message } }, error.status, requestId);
 				if (error instanceof SolanaError) return json({ error: { code: "solana_error", message: error.message } }, error.status, requestId);
-				if (error instanceof SwapError) return json({ error: { code: "swap_error", message: error.message } }, error.status, requestId);
+				if (error instanceof SwapError) return json({ error: { code: "swap_error", message: error.message, ...(error.details ? { details: error.details } : {}) } }, error.status, requestId);
 				if (error instanceof PendingSwapError) return json({ error: { code: "pending_swap_error", message: error.message } }, error.status, requestId);
 				if (error instanceof CosmosFeatureError) return json({ error: { code: "cosmos_feature_error", message: error.message } }, error.status, requestId);
 				if (error instanceof HiveError) return json({ error: { code: "hive_error", message: error.message } }, error.status, requestId);
