@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { PersistentCache } from "./cache";
 import { normalizeExtendedKeyVersion, UtxoClient } from "./utxo";
+import { LTC_SCRIPT_FIXTURES } from "../live/ltc-script-discovery";
 
 class TestCache implements PersistentCache {
 	private values = new Map<string, unknown>();
@@ -25,6 +26,28 @@ describe("UtxoClient", () => {
 	test("remaps chain-specific extended key versions without changing key data", () => {
 		const ltub = "Ltub2YDQmP391UYeDYvLye9P1SuNJFkcRGN7SYHM8JMxaDnegcPTXHJ2BnYmvHnFnGPGKu2WMuCga6iZV3SDxDMGrRyMcrYEfSPhrpS1EPkC43E";
 		expect(normalizeExtendedKeyVersion(ltub).startsWith("xpub")).toBe(true);
+	});
+
+	test("preserves Litecoin wrapped and native SegWit identities across account, UTXO and history reads", async () => {
+		const ltc = { networkId: "bip122:12a765e31ffd4059bada1e25190f6e98", symbol: "LTC", host: "blockbook.test" };
+		// Litecoin Blockbook maps Mtub -> BIP49/M-addresses and zpub -> BIP84/
+		// ltc1q. Bitcoin ypub on that node falls back to BIP44/L-addresses.
+		for (const { purpose, publicKey: fixture } of LTC_SCRIPT_FIXTURES.filter(fixture => fixture.purpose !== 44)) {
+			const routes: string[] = [];
+			expect(normalizeExtendedKeyVersion(fixture)).toBe(fixture);
+			const client = new UtxoClient({ apiKey: "test", cache: new TestCache(), networks: [ltc], fetch: (async input => {
+				const url = new URL(String(input)); routes.push(url.pathname);
+				if (url.pathname.includes("/tx/")) return Response.json({ txid: TXID, hex: "0102", vin: [], vout: [] });
+				const requestedKey = decodeURIComponent(url.pathname.split("/").pop() || "");
+				if (requestedKey !== fixture) return Response.json({ balance: "0", tokens: [], transactions: [] });
+				if (url.pathname.includes("/utxo/")) return Response.json([{ txid: TXID, vout: 0, value: "3039975", path: `m/${purpose}'/2'/0'/0/0` }]);
+				return Response.json({ balance: "3039975", tokens: [{ path: `m/${purpose}'/2'/0'/0/0` }], transactions: [{ txid: TXID, value: "3039975", confirmations: 1, vin: [], vout: [] }] });
+			}) as typeof fetch });
+			expect((await client.getPubkeyInfo("LTC", fixture)).balance).toBe("3039975");
+			expect((await client.listUnspent("LTC", fixture))[0]).toMatchObject({ value: "3039975", path: `m/${purpose}'/2'/0'/0/0` });
+			expect((await client.getTransactionHistory("LTC", fixture))[0]).toMatchObject({ txid: TXID, value: "3039975" });
+			expect(routes.filter(route => !route.includes("/tx/"))).toHaveLength(3);
+		}
 	});
 
 	test("returns signing-ready UTXOs and reuses transaction details", async () => {

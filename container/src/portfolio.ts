@@ -142,7 +142,7 @@ function balanceKey(balance: Pick<PortfolioBalance, "caip" | "pubkey">): string 
 export class PortfolioClient {
 	constructor(private readonly dependencies: PortfolioDependencies) {}
 
-	async getBalances(body: PortfolioRequest): Promise<PortfolioResponse> {
+	async getBalances(body: PortfolioRequest, options: { forceRefresh?: boolean } = {}): Promise<PortfolioResponse> {
 		this.validate(body);
 		const startedAt = performance.now();
 		const fetchedAt = Date.now();
@@ -224,9 +224,16 @@ export class PortfolioClient {
 				return;
 			}
 			try {
-				const info = await this.dependencies.utxo.getPubkeyInfo(entry.networkId, entry.pubkey);
+				const info = await this.dependencies.utxo.getPubkeyInfo(entry.networkId, entry.pubkey, options);
 				const metadata = nativeMetadata(entry.caip);
-				const amount = formatUnits(BigInt(String(info?.balance ?? "0")), metadata.decimals);
+				// Blockbook's unconfirmedBalance is the signed net mempool change,
+				// including pending spends. Adding it once matches the legacy UTXO
+				// balance contract and keeps fresh receives visible before mining.
+				const confirmed = String(info?.balance ?? "0"), pending = String(info?.unconfirmedBalance ?? "0");
+				if (!/^\d+$/.test(confirmed) || !/^-?\d+$/.test(pending)) throw new Error("Blockbook returned an invalid account balance");
+				const total = BigInt(confirmed) + BigInt(pending);
+				if (total < 0n) throw new Error("Blockbook returned an inconsistent negative account balance");
+				const amount = formatUnits(total, metadata.decimals);
 				const tokens = Array.isArray(info?.tokens) ? info.tokens : [];
 				const discoveredAddress = tokens.find((token: any) => Number(token?.transfers) > 0)?.name || tokens[0]?.name;
 				const balance = this.makeBalance({

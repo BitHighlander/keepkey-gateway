@@ -18,11 +18,25 @@ export interface DemandCachePolicy {
 export class DemandCache {
 	private readonly memory = new Map<string, MemoryEntry<unknown>>();
 	private readonly inFlight = new Map<string, Promise<unknown>>();
+	private readonly refreshInFlight = new Map<string, Promise<unknown>>();
 
 	constructor(private readonly persistent: PersistentCache, private readonly maxEntries = 2_000) {}
 
-	async get<T>(policy: DemandCachePolicy, loader: () => Promise<T>): Promise<T> {
+	async get<T>(policy: DemandCachePolicy, loader: () => Promise<T>, options: { forceRefresh?: boolean } = {}): Promise<T> {
 		const compoundKey = `${policy.namespace}:${policy.key}`;
+		const refreshing = this.refreshInFlight.get(compoundKey) as Promise<T> | undefined;
+		if (refreshing) return refreshing;
+		if (options.forceRefresh) {
+			this.memory.delete(compoundKey);
+			const prior = this.inFlight.get(compoundKey);
+			const request = (async () => {
+				// Do not let an older ordinary read overwrite the forced result.
+				if (prior) await prior.catch(() => undefined);
+				return this.load(policy, compoundKey, loader, true);
+			})().finally(() => this.refreshInFlight.delete(compoundKey));
+			this.refreshInFlight.set(compoundKey, request);
+			return request;
+		}
 		const memory = this.memory.get(compoundKey) as MemoryEntry<T> | undefined;
 		if (memory && memory.expiresAt > Date.now()) return memory.value;
 
@@ -34,8 +48,8 @@ export class DemandCache {
 		return request;
 	}
 
-	private async load<T>(policy: DemandCachePolicy, compoundKey: string, loader: () => Promise<T>): Promise<T> {
-		const persisted = await this.persistent.getFresh<T>(policy.namespace, policy.key);
+	private async load<T>(policy: DemandCachePolicy, compoundKey: string, loader: () => Promise<T>, forceRefresh = false): Promise<T> {
+		const persisted = forceRefresh ? null : await this.persistent.getFresh<T>(policy.namespace, policy.key);
 		if (persisted !== null) {
 			this.remember(compoundKey, persisted, policy.freshForMs);
 			return persisted;
@@ -43,7 +57,7 @@ export class DemandCache {
 
 		try {
 			return await this.persistent.runExclusive(`cache:${compoundKey}`, async () => {
-				const afterLock = await this.persistent.getFresh<T>(policy.namespace, policy.key);
+				const afterLock = forceRefresh ? null : await this.persistent.getFresh<T>(policy.namespace, policy.key);
 				if (afterLock !== null) {
 					this.remember(compoundKey, afterLock, policy.freshForMs);
 					return afterLock;
@@ -54,6 +68,9 @@ export class DemandCache {
 				return value;
 			});
 		} catch (error) {
+			// A manual refresh must report upstream failure rather than relabel a
+			// cached pre-deposit zero as a current, verified balance.
+			if (forceRefresh) throw error;
 			const stale = await this.persistent.getStale<T>(policy.namespace, policy.key);
 			if (stale !== null) return stale;
 			throw error;

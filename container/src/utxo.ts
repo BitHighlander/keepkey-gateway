@@ -8,7 +8,8 @@ const EXTENDED_KEY_PREFIXES = ["xpub", "ypub", "zpub", "tpub", "upub", "vpub", "
 const VERSION_REMAP: Readonly<Record<string, string>> = {
 	dgub: "0488b21e",
 	Ltub: "0488b21e",
-	Mtub: "049d7cb2",
+	// Litecoin Blockbook recognizes Mtub as wrapped SegWit. Rewriting it to
+	// Bitcoin's ypub makes that node scan legacy addresses and report zero.
 	drkp: "0488b21e",
 };
 
@@ -144,7 +145,7 @@ export class UtxoClient {
 		return network;
 	}
 
-	async getPubkeyInfo(networkValue: string, publicKey: string): Promise<any> {
+	async getPubkeyInfo(networkValue: string, publicKey: string, options: { forceRefresh?: boolean } = {}): Promise<any> {
 		const network = this.resolveNetwork(networkValue);
 		const normalized = normalizeExtendedKeyVersion(publicKey);
 		if (!normalized || normalized.length > 512) throw new UtxoError("Invalid public key or address", 400);
@@ -157,7 +158,7 @@ export class UtxoClient {
 			const body = response as any;
 			if (!Array.isArray(body.tokens)) body.tokens = [];
 			return body;
-		});
+		}, options);
 	}
 
 	async listUnspent(networkValue: string, publicKey: string): Promise<any[]> {
