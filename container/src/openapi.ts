@@ -138,7 +138,7 @@ export function openApiDocument(requestUrl: string): Record<string, unknown> {
 				post: {
 					operationId: "GetPortfolioBalances",
 					security: [{ queryKey: [] }],
-					parameters: [{ name: "forceRefresh", in: "query", required: false, schema: { type: "boolean" } }],
+					parameters: [{ name: "forceRefresh", in: "query", required: false, description: "For UTXO accounts, bypass balance caches and stale fallback. Other providers retain their normal cache policy.", schema: { type: "boolean" } }],
 					requestBody: {
 						required: true,
 						content: {

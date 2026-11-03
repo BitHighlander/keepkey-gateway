@@ -81,6 +81,13 @@ function queryKey(request: Request): string | null {
 		|| null;
 }
 
+function queryBoolean(url: URL, name: string): boolean {
+	const raw = url.searchParams.get(name);
+	if (raw === null || raw === "false") return false;
+	if (raw === "true") return true;
+	throw new HttpError(400, "invalid_query", `${name} must be true or false`);
+}
+
 export function createApp({ database, zerion, evm, market, utxo, portfolio, history, account, solana, catalog, quoteRouter, pendingSwaps, cosmosFeatures, hive, telemetry, multichainBroadcast, realtime }: AppDependencies): { fetch(request: Request): Promise<Response> } {
 	return {
 		async fetch(request) {
@@ -276,7 +283,7 @@ export function createApp({ database, zerion, evm, market, utxo, portfolio, hist
 					if (!portfolio) throw new HttpError(503, "feature_unavailable", "Portfolio aggregation is not configured");
 					await authenticated();
 					const body = await bodyObject(request) as unknown as PortfolioRequest;
-					return json(await portfolio.getBalances(body), 200, requestId, { "Cache-Control": "no-store" });
+					return json(await portfolio.getBalances(body, { forceRefresh: queryBoolean(url, "forceRefresh") }), 200, requestId, { "Cache-Control": "no-store" });
 				}
 
 				if (request.method === "POST" && url.pathname === "/api/v1/tx/history") {
