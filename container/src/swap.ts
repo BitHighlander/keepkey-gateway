@@ -34,7 +34,7 @@ export interface QuoteAdapter {
 }
 
 export class SwapError extends Error {
-	constructor(message: string, public readonly status = 502) {
+	constructor(message: string, public readonly status = 502, public readonly details?: Record<string, unknown>) {
 		super(message);
 	}
 }
@@ -930,6 +930,16 @@ export class QuoteRouter {
 					meta: { ...entry.quote.meta, routeDiagnostics: { selectedTier: tier, fallback: tier > 0, attempts: [...attempts] } },
 				} }));
 			}
+		}
+		// Explain a protocol halt only after every fallback has been attempted.
+		// Retain the original failures for diagnostics without putting host URLs
+		// and upstream handler errors in the user-facing message.
+		const halted = attempts.filter((attempt) => ["thorchain", "mayachain"].includes(attempt.provider)
+			&& /trading is halted/i.test(attempt.reason || ""));
+		if (halted.length > 0) {
+			const providers = halted.map((attempt) => attempt.provider === "thorchain" ? "THORChain" : "MayaChain");
+			throw new SwapError(`${providers.join(" and ")} ${providers.length === 1 ? "has" : "have"} paused trading for this route. No alternative swap route is currently available. Choose another pair or try again after trading resumes.`, 503,
+				{ reason: "trading_halted", providers: halted.map((attempt) => attempt.provider), attempts });
 		}
 		throw new SwapError(`Swap unavailable: ${reasons.join(" | ")}`, 503);
 	}

@@ -363,4 +363,26 @@ describe("execution validation and fallback visibility", () => {
 				throw new Error("out of gas"); return quote; } });
 		expect((await router.quote(request))[0].integration).toBe("shapeshift");
 	});
+	test("explains a trading halt only after all fallback tiers fail and retains their diagnostics", async () => {
+		const attempted: string[] = [];
+		const failures = [
+			{ key: "thorchain", tier: 0, reason: "thorchain quote hosts failed: https://host returned 400: failed to simulate handler: trading is halted" },
+			{ key: "shapeshift", tier: 1, reason: "ShapeShift returned no fallback route" },
+			{ key: "swapkit", tier: 2, reason: "SwapKit returned no fee-attributed executable route" },
+		];
+		const router = new QuoteRouter(failures.map(({ key, tier, reason }) => ({ key, tier, eligible: () => true,
+			quote: async () => { attempted.push(key); throw new Error(reason); } })));
+		const error = await router.quote(request).catch((error) => error);
+		expect(error).toBeInstanceOf(SwapError);
+		expect(error.status).toBe(503);
+		expect(error.message).toBe("THORChain has paused trading for this route. No alternative swap route is currently available. Choose another pair or try again after trading resumes.");
+		expect(error.details).toMatchObject({ reason: "trading_halted", providers: ["thorchain"], attempts: failures.map(({ key, reason }) => ({ provider: key, status: "unavailable", reason })) });
+		expect(attempted).toEqual(["thorchain", "shapeshift", "swapkit"]);
+	});
+	test("does not mislabel a network failure as a trading halt", async () => {
+		const router = new QuoteRouter([{ key: "thorchain", eligible: () => true, quote: async () => { throw new Error("HTTP 502"); } }]);
+		const error = await router.quote(request).catch((error) => error);
+		expect(error.message).toBe("Swap unavailable: HTTP 502");
+		expect(error.details).toBeUndefined();
+	});
 });
