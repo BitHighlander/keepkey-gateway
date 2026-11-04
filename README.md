@@ -36,6 +36,12 @@ streaming compatibility. Migration parity is checked against the
 [Vault contract](./docs/VAULT-PIONEER-CONTRACT.md); live provider availability
 still depends on networks, trading pairs, amounts and configured API keys.
 
+The deployment configuration also assigns `https://api-blue.keepkey.info` to this
+same gateway as Pioneer's blue environment. `api.keepkey.info` remains the legacy
+green service. See [the blue cutover procedure](./docs/BLUE-CUTOVER.md) for DNS,
+live verification, legacy deployment retirement and rollback. Configuration in
+this repository alone does not establish that the live cutover has completed.
+
 ## Plan
 
 1. Freeze the API behavior actually consumed by the current Vault.

@@ -4,6 +4,10 @@ const baseUrl = (process.argv.find((arg) => arg.startsWith("--url="))?.slice(6) 
 const modulePath = process.env.VAULT_PIONEER_CLIENT_PATH
 	|| "/Users/highlander/WebstormProjects/keepkey-stack/projects/keepkey-vault-v11/projects/keepkey-vault/node_modules/@pioneer-platform/pioneer-client/lib/index.js";
 const { default: Pioneer } = await import(pathToFileURL(modulePath).href);
+const specificationResponse = await fetch(`${baseUrl}/spec/swagger.json`, { signal: AbortSignal.timeout(30_000) });
+if (!specificationResponse.ok) throw new Error(`Specification failed (${specificationResponse.status})`);
+const specification = await specificationResponse.json();
+if (specification.servers?.[0]?.url !== `${baseUrl}/api/v1`) throw new Error("Specification advertises the wrong public API origin");
 const queryKey = `gateway:portfolio-probe:${crypto.randomUUID()}:${crypto.randomUUID()}`;
 const nativeFetch = globalThis.fetch;
 const observations = [];
