@@ -2,7 +2,7 @@
 
 Target: `api-blue.keepkey.info` routes to the same Cloudflare Worker and gateway
 container as `oracles.cc`. The production hostname `api.keepkey.info` continues
-to use legacy green. This configuration does not establish a completed cutover.
+to use legacy green. Follow the gates below for future cutovers and rollback.
 
 ## Deployment order
 
@@ -56,12 +56,32 @@ if either was changed. Keep the `oracles.cc/*` route in place. Verify legacy
 blue health and Swagger, plus green health. The retired legacy deployment jobs
 remain retired unless a separate decision restores their ownership.
 
-## Recorded preparation, 2026-11-04
+## Completed cutover, 2026-11-04
 
 Host access to Wrangler and Kubernetes is available. Wrangler's OAuth credential
 can manage Worker routes but its DNS-record read endpoint returns HTTP 403.
 The existing blue A record was inspected in the authenticated Cloudflare browser
 session: it is already proxied, so no DNS-record change is required. Rollback
 snapshots remain private. Earlier sandbox name-resolution and listener failures
-must not be treated as evidence that the host's DNS is broken. Record cutover
-completion only after the replacement and retirement gates above pass.
+must not be treated as evidence that the host's DNS is broken.
+
+The existing OAuth login successfully applied both routes using the locked
+Wrangler's `triggers deploy`. No new token or DNS-record edit was needed. Both
+domains passed health and database checks at the published gateway revision
+`bff70f2a83e2db01a7acb8f06d2dd714974ceaf3`.
+
+Blue's HTTPS OpenAPI origin, all three Litecoin derivation families (including
+receive/change branches), eight concurrent installed Vault SDK balance requests,
+public receive balances and transaction history passed. An authenticated SSE
+connection delivered both its connected frame and a sync event. These checks
+used public fixtures and did not sign or broadcast transactions.
+
+Legacy Pioneer PR219 was merged and its workflow retirement backported to
+`develop`, `release/v1.5.0` and `release/v1.4.5`. The exact old Deployment
+`default/pioneer-server-v3-blue-2l3smo5j` was deleted in context
+`do-sfo3-do-cluster-2b9226d` after its UID and template were rechecked against the
+private snapshot. No HPA targeted it. Its pods are absent, and blue passed the
+same exact-revision health check after deletion. The Service, Ingress and DNS
+record remain available for rollback. Green still reports the same legacy
+service version 1.4.5 and its pre-existing degraded status; this cutover does not
+resolve that separate health condition.
