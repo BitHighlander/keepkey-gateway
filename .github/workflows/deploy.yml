@@ -49,3 +49,8 @@ jobs:
         run: bun container/live/provider-parity.ts https://oracles.cc
       - name: Live Litecoin script discovery
         run: bun container/live/ltc-script-discovery.ts https://oracles.cc
+      - name: Verify blue gateway alias
+        run: |
+          bun container/live/deploy-health.ts https://api-blue.keepkey.info "$GITHUB_SHA"
+          bun -e 'const r = await fetch("https://api-blue.keepkey.info/spec/swagger.json", { signal: AbortSignal.timeout(30000) }); if (!r.ok || (await r.json()).servers?.[0]?.url !== "https://api-blue.keepkey.info/api/v1") throw new Error("Blue OpenAPI origin mismatch")'
+          bun container/live/ltc-script-discovery.ts https://api-blue.keepkey.info
