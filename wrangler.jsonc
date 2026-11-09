@@ -13,8 +13,23 @@
   "vars": {
     "PORT": "12000",
     "DATABASE_MAX_CONNECTIONS": "5",
-    "HIVE_ONBOARDING_ENABLED": "false"
+    "HIVE_ONBOARDING_ENABLED": "false",
+    // Keep empty until custom-hostname, data-continuity and capacity gates pass.
+    // Planned production host: api.keepkey.com.
+    // Production pool (src/pool.ts). Hosts listed here get the warm floor, overload
+    // spill-over up to PROD_MAX_INSTANCES (hard cap: keepkey-gateway-prod max_instances)
+    // and failover to LEGACY_ORIGIN. PROD_UPSTREAM=legacy sends all prod traffic to
+    // legacy (instant rollback). Empty PROD_HOSTS = no warm instances.
+    "PROD_HOSTS": "",
+    "PROD_MIN_INSTANCES": "2",
+    "PROD_MAX_INSTANCES": "4",
+    "PROD_UPSTREAM": "gateway",
+    "LEGACY_ORIGIN": "https://api.keepkey.info",
+    // Per-instance in-flight cap; above it the container answers 503 overloaded.
+    // ponytail: static guess, tune from a load test.
+    "GATEWAY_MAX_INFLIGHT": "200"
   },
+  "triggers": { "crons": ["* * * * *"] },
   "secrets": {
     "required": [
       "REALTIME_SCHEDULER_SECRET",
@@ -35,16 +50,27 @@
       "instance_type": "standard-2",
       "max_instances": 3,
       "rollout_step_percentage": 100
+    },
+    {
+      "name": "keepkey-gateway-prod",
+      "class_name": "ProdGatewayContainer",
+      "image": "./container/Dockerfile",
+      "image_build_context": ".",
+      "instance_type": "standard-2",
+      "max_instances": 4,
+      "rollout_step_percentage": 50
     }
   ],
   "durable_objects": {
     "bindings": [
       { "name": "PIONEER_CONTAINER", "class_name": "PioneerContainer" },
+      { "name": "PROD_CONTAINER", "class_name": "ProdGatewayContainer" },
       { "name": "REALTIME_WATCHDOG", "class_name": "RealtimeWatchdog" }
     ]
   },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["PioneerContainer"] },
-    { "tag": "v2", "new_sqlite_classes": ["RealtimeWatchdog"] }
+    { "tag": "v2", "new_sqlite_classes": ["RealtimeWatchdog"] },
+    { "tag": "v3", "new_sqlite_classes": ["ProdGatewayContainer"] }
   ]
 }

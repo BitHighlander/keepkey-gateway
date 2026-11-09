@@ -1,7 +1,55 @@
 # Pioneer v5 migration plan
 
-Status: proposed execution plan  
+Status: staged migration; production cutover gates remain open
 Companion contract: [VAULT-PIONEER-CONTRACT.md](./VAULT-PIONEER-CONTRACT.md)
+
+## Execution checkpoint — 2026-11-09
+
+The production target from the November 8 operator plan is **api.keepkey.com**.
+Keep **api.keepkey.info** on legacy for installed clients. **oracles.cc** and
+**api-blue.keepkey.info** already serve the gateway. Do not move the keepkey.com
+DNS zone: its websites and mail remain on their current infrastructure. The
+planned route uses Cloudflare for SaaS on the oracles.cc zone plus the narrowly
+scoped GoDaddy record/custom-hostname validation for api.keepkey.com.
+
+Zerion polling coalescing and durable provider usage metrics shipped separately
+in PR #13 at revision `102f15727e6457c82f14640be430307cbcbcf331`. Both gateway
+hosts passed exact-revision health, quote fixtures, and Litecoin script-discovery
+checks. PostgreSQL migration 8 and live usage rows were verified read-only.
+These deployment checks do not establish full production migration parity.
+
+The prepared production pool remains **disabled** (`PROD_HOSTS` is empty) until
+the gates below pass. Enabling a two-instance warm floor creates ongoing
+compute cost even before DNS traffic arrives. Blue/test traffic retains its
+single scale-to-zero container. The pool routes to warm instances, then bounded
+burst instances, with an explicit legacy switch. A failed dispatch of a mutation
+is ambiguous and must return `delivery_unknown`; only a known failure before
+dispatch or the pre-handler overload signal permits replay elsewhere.
+
+| Gate | Current evidence / required action |
+| --- | --- |
+| Hostname, TLS and routing | api.keepkey.com was unresolved at the November 9 baseline. Complete SaaS custom-hostname validation, certificate issuance and exact-revision checks before selecting it in Desktop. No production DNS change is included here. The November 9 read-only preflight passed all 30 declared operations on both test hosts; the production hostname remained unreachable. |
+| Pending-swap continuity | Legacy and gateway databases are separate. Choose and test an idempotent import or origin-aware tracking path for active legacy swaps. A matching API route does not make the data portable. |
+| Authentication and rollback | Clients created only on the gateway may not authenticate on legacy. Prove registration continuity and endpoint compatibility before treating `PROD_UPSTREAM=legacy` as transparent rollback. Durable replay/watch routes also differ. |
+| Read parity | The declared 30 SDK operations can be checked by the read-only preflight below. Complete a funded/empty/token/UTXO/degraded-wallet comparison; quote and Litecoin discovery smoke checks alone are insufficient. |
+| UTXO history correctness | Prepared fix nets owned outputs and inputs, preserves Base58 case and exact integer amounts, and rejects missing ownership/amount data. Validate public read fixtures before shipping. |
+| Capacity and cost | Measure realistic concurrency and stream behavior, tune the initial in-flight cap, and confirm the database connection ceiling. Four production instances plus one blue instance at five connections each can use 25 sessions. |
+| Streaming and cross-replica delivery | IP stickiness does not prove cross-replica event fanout or immunity to changing client IPs. Exercise socket/SSE fallback, reconnect catch-up, and durable monitoring across restarts. |
+| Background usage | Explicit durable watches keep working when Desktop is closed. Measure their ongoing Zerion traffic separately from connected polling; do not claim a zero-upstream idle invariant while enabled durable watches exist. A temporary burn-address watch was accepted and removed on November 9; its recorded provider history attempts returned HTTP 400, so this verifies error accounting, not successful background delivery. |
+| Desktop release | Remove hardcoded API fallback URLs and migrate the official picker row before changing the shared default. Preserve static `/coins` hosting until the gateway has an equivalent. The Vault release owner has a separate handoff. |
+| Database readiness | The current hosted database is the alpha, single-node cluster. Verify backups/restore, connection capacity and the production data-isolation decision recorded in PLANETSCALE.md. |
+
+Read-only advertised-contract preflight (no registration, upstream wallet read,
+watch creation, quote, signing or broadcast):
+
+```sh
+bun container/live/migration-readiness.ts \
+  https://oracles.cc https://api-blue.keepkey.info https://api.keepkey.com
+```
+
+The command exits unsuccessfully if any requested origin lacks the declared
+contract or is unreachable. A successful result covers API discovery only.
+Do not flip Desktop's default until the remaining gates are recorded as passed.
 
 ## Outcome
 
@@ -25,8 +73,8 @@ infrastructure.
 1. **Consumer-first scope.** An endpoint is implemented only when the current
    Vault contract or another named active consumer requires it.
 2. **Zero idle upstream traffic.** When no client is connected or making a
-   request, v5 makes zero chain, indexer, pricing, swapper, or discovery API
-   calls. Database maintenance and platform health checks are not upstream
+   request and no explicit durable watch is enabled, v5 makes zero chain,
+   indexer, pricing, swapper, or discovery API calls. Database maintenance and platform health checks are not upstream
    provider calls, but should also be kept minimal.
 3. **Demand is leased.** Work exists only while an authenticated connection or
    in-flight request expresses interest. Persistent data never implies an
@@ -180,7 +228,8 @@ pioneer_cache_result_total{kind,result}
 pioneer_upstream_batch_size{adapter}
 ```
 
-An automated soak gate must:
+An automated soak gate must begin with no enabled durable watches. Test explicit
+background monitoring separately from connected demand. The idle gate must:
 
 1. start v5 and wait for readiness;
 2. make no client request or connection;

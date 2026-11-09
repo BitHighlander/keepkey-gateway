@@ -21,6 +21,7 @@ export interface ContainerRuntimeEnv {
 	HIVE_ONBOARDING_ENABLED?: string;
 	HIVE_SPONSOR_ACCOUNT?: string;
 	HIVE_SPONSOR_ACTIVE_WIF?: string;
+	GATEWAY_MAX_INFLIGHT?: string;
 }
 
 const CONTAINER_ENV_NAMES = [
@@ -39,6 +40,7 @@ const CONTAINER_ENV_NAMES = [
 	"HIVE_ONBOARDING_ENABLED",
 	"HIVE_SPONSOR_ACCOUNT",
 	"HIVE_SPONSOR_ACTIVE_WIF",
+	"GATEWAY_MAX_INFLIGHT",
 ] as const;
 
 export function containerEnv(env: ContainerRuntimeEnv): Record<string, string> {
