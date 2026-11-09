@@ -200,22 +200,49 @@ export class UtxoClient {
 			if (body === null) return [];
 			// Blockbook omits `transactions` entirely (omitempty) for accounts with no history.
 			if (typeof body !== "object" || (body.transactions != null && !Array.isArray(body.transactions))) throw new UtxoError(`Blockbook returned invalid transaction history for ${network.symbol}: ${JSON.stringify(body).slice(0, 160)}`);
+			// Ownership: Blockbook's isOwn (xpub queries), or the queried address itself.
+			const addressKey = (address: string) => network.symbol === "BCH"
+				? address.replace(/^bitcoincash:/i, "").toLowerCase()
+				: /^(?:bc1|tb1|bcrt1|ltc1|tltc1)/i.test(address) ? address.toLowerCase() : address;
+			// Base58 is case-sensitive. XPUBAddress tokens supplement isOwn when a
+			// provider returns derived addresses without per-input/output flags.
+			const owned = isExtendedKey(normalized)
+				? (Array.isArray(body.tokens) ? body.tokens.filter((token: any) => token?.type === "XPUBAddress" && typeof token.name === "string").map((token: any) => token.name) : [])
+				: [normalized, this.cashAddress(network, normalized)];
+			const ownAddrs = new Set<string>(owned.map(addressKey));
+			const isOwn = (row: any) => row?.isOwn === true || (Array.isArray(row?.addresses) && row.addresses.some((address: any) => typeof address === "string" && ownAddrs.has(addressKey(address))));
+			const sats = (rows: any[]): bigint => rows.reduce((sum, row) => {
+				const value = row?.value;
+				if ((typeof value !== "string" || !/^\d+$/.test(value)) && (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0)) {
+					throw new UtxoError("Blockbook history omitted an exact wallet amount");
+				}
+				return sum + BigInt(value);
+			}, 0n);
+			const addrs = (rows: any[]) => rows.flatMap((row: any) => Array.isArray(row?.addresses) ? row.addresses : []);
 			return (body.transactions || []).map((tx: any) => {
-				const hasOwnInput = Array.isArray(tx?.vin) && tx.vin.some((input: any) => input?.isOwn === true);
-				const hasOwnOutput = Array.isArray(tx?.vout) && tx.vout.some((output: any) => output?.isOwn === true);
+				const vin: any[] = Array.isArray(tx?.vin) ? tx.vin : [];
+				const vout: any[] = Array.isArray(tx?.vout) ? tx.vout : [];
+				const ownIn = vin.filter(isOwn), ownOut = vout.filter(isOwn);
+				const extIn = vin.filter((row) => !isOwn(row)), extOut = vout.filter((row) => !isOwn(row));
+				if (!ownIn.length && !ownOut.length) throw new UtxoError("Blockbook history omitted wallet ownership data");
+				// value = the wallet's NET change, never tx.value (Blockbook's total of ALL
+				// outputs): a payment with sender change would otherwise count the sender's
+				// change as the user's money. A send with change is "sent", not "self".
+				const net = sats(ownOut) - sats(ownIn);
+				const direction = ownIn.length === 0 || net > 0n ? "received" : extOut.length > 0 ? "sent" : "self";
 				return {
 					txid: String(tx?.txid || ""),
 					caip: `${network.networkId}/slip44:${SLIP44_BY_SYMBOL[network.symbol] ?? 0}`,
 					networkId: network.networkId,
-					direction: hasOwnInput && hasOwnOutput ? "self" : hasOwnInput ? "sent" : "received",
+					direction,
 					type: "transfer",
 					status: Number(tx?.confirmations) > 0 ? "confirmed" : "pending",
 					blockHeight: Number.isInteger(Number(tx?.blockHeight)) ? Number(tx.blockHeight) : undefined,
 					timestamp: Number(tx?.blockTime) > 0 ? Number(tx.blockTime) : Math.floor(Date.now() / 1000),
 					confirmations: Number.isInteger(Number(tx?.confirmations)) ? Math.max(0, Number(tx.confirmations)) : undefined,
-					from: Array.isArray(tx?.vin) ? tx.vin.flatMap((input: any) => Array.isArray(input?.addresses) ? input.addresses : []) : [],
-					to: Array.isArray(tx?.vout) ? tx.vout.flatMap((output: any) => Array.isArray(output?.addresses) ? output.addresses : []) : [],
-					value: String(tx?.value || "0"),
+					from: direction === "received" ? addrs(extIn) : addrs(ownIn),
+					to: direction === "sent" ? addrs(extOut) : addrs(ownOut),
+					value: (net < 0n ? -net : net).toString(),
 					fee: tx?.fees == null ? undefined : String(tx.fees),
 				};
 			});

@@ -2,6 +2,7 @@ import { ProviderMetrics } from "./src/provider-metrics";
 import { loadConfig } from "./src/config";
 import { createDatabase } from "./src/database";
 import { createApp } from "./src/http";
+import { overloadGuard } from "./src/overload";
 import { ZerionClient } from "./src/zerion";
 import { EvmClient } from "./src/evm";
 import { MarketClient } from "./src/market";
@@ -79,6 +80,7 @@ const realtimeMonitor = database.realtime && config.realtimeSchedulerSecret
 const app = createApp({ config, database, zerion, evm, market, utxo, portfolio, history, account, solana, catalog, quoteRouter, pendingSwaps, cosmosFeatures, hive, telemetry, multichainBroadcast, realtime, realtimeMonitor });
 
 interface SocketData { id: string; session?: RealtimeSocketSession; lastPong?: number; heartbeat?: ReturnType<typeof setInterval> }
+const guardedFetch = overloadGuard(Number.parseInt(process.env.GATEWAY_MAX_INFLIGHT || "0", 10) || 0, request => app.fetch(request));
 const server = Bun.serve<SocketData>({
 	port: config.port,
 	// Provider fallbacks are individually bounded but a cold multi-chain request
@@ -91,7 +93,7 @@ const server = Bun.serve<SocketData>({
 			if (bunServer.upgrade(request, { data: { id: crypto.randomUUID() } })) return;
 			return Response.json({ error: "WebSocket upgrade required" }, { status: 426 });
 		}
-		return app.fetch(request);
+		return guardedFetch(request);
 	},
 	websocket: {
 		open(ws) {

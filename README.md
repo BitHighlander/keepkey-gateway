@@ -12,8 +12,9 @@ of a self-managed Kubernetes cluster on DigitalOcean.
 - `pioneer-server-v3` depends on Redis, Mongo, Watchtower, and a separate cache
   worker. The v5 runtime is one service image, PostgreSQL as its only shared
   durable state, and bounded in-process memory.
-- Work is demand-driven: no connected/requesting wallets means zero upstream
-  chain, indexer, pricing, or swapper API calls.
+- Work is demand-driven. Without connected/requesting wallets or explicitly
+  enabled durable watches, no upstream wallet polling is needed. Durable
+  monitoring continues while its saved watches remain enabled.
 - Bun everywhere — the container runtime and (once there's real tooling
   beyond Wrangler) the repo's own scripts.
 - OSS from the start, hosted under `bithighlander` for now.

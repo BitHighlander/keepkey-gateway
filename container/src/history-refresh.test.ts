@@ -22,7 +22,7 @@ function fixture() {
   calls++; expect(String(input)).toContain("details=txs");
   return offline ? Response.json({ error: "upstream unavailable" }, { status: 503 }) : Response.json({ transactions: [{
    txid, confirmations, blockHeight: confirmations ? 3206873 : 0, blockTime: 1793730000,
-   value: "3673094", fees: "1000", vin: [{ isOwn: true, addresses: ["source-fixture"] }], vout: [{ addresses: ["recipient-fixture"] }],
+   value: "3673094", fees: "1000", vin: [{ isOwn: true, addresses: ["source-fixture"], value: "3674094" }], vout: [{ addresses: ["recipient-fixture"], value: "3673094" }],
   }] });
  }) as typeof fetch });
  const history = new HistoryClient({ utxo, zerion: { getTransactions: async () => [] } });
