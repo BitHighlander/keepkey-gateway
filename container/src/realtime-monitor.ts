@@ -1,3 +1,4 @@
+import { providerContext } from "./provider-metrics";
 import { createHash } from "node:crypto";
 import type { HistoryClient } from "./history";
 import type { DurableEventInput, DurableRealtimeStore, DurableWatch } from "./realtime-store";
@@ -32,39 +33,59 @@ export class RealtimeMonitor {
   const rows = await this.store.listActiveWatches();
   const grouped = new Map<string, DurableWatch[]>();
   for (const row of rows) { const key = watchKey(row), group = grouped.get(key) || []; group.push(row); grouped.set(key, group); }
-  const records = [...grouped.values()], incoming: DurableEventInput[] = []; let failures = 0, queued = 0, next = 0, possiblyTruncated = 0, unknownConfirmedTimestamps = 0;
+  const records = [...grouped.values()];
+  const evmBatches = new Map<string, DurableWatch[][]>(), batches: DurableWatch[][][] = [];
+  for (const owners of records) {
+   const watch = owners[0];
+   if (watch.networkId.startsWith("eip155:")) {
+    const key = watch.address.toLowerCase(), batch = evmBatches.get(key) || [];
+    batch.push(owners); evmBatches.set(key, batch);
+   } else batches.push([owners]);
+  }
+  for (const batch of evmBatches.values()) {
+   for (let offset = 0; offset < batch.length; offset += 100) batches.push(batch.slice(offset, offset + 100));
+  }
+  const incoming: DurableEventInput[] = []; let failures = 0, queued = 0, next = 0, possiblyTruncated = 0, unknownConfirmedTimestamps = 0;
   // Bound upstream concurrency while letting a slow chain yield to other work.
-  await Promise.all(Array.from({ length: Math.min(6, records.length) }, async () => {
+  await Promise.all(Array.from({ length: Math.min(6, batches.length) }, async () => {
    for (;;) {
-    const index = next++; if (index >= records.length) return;
-    const owners = records[index], watch = owners[0], caip = nativeCaip.get(watch.networkId);
-    if (!caip) { failures++; continue; }
+    const index = next++; if (index >= batches.length) return;
+    const batch = batches[index].filter(owners => {
+     if (nativeCaip.has(owners[0].networkId)) return true;
+     failures++; return false;
+    });
+    if (!batch.length) continue;
     try {
-     const result: any = await this.history.getTransactionHistory({ queries: [{ caip, pubkey: watch.address }] }, { forceRefresh: true });
-     const txs = result?.histories?.[0]?.transactions;
-     if (!Array.isArray(txs)) { failures++; continue; }
-     if (txs.length >= 50) possiblyTruncated++;
-     for (const tx of txs.slice(0, 200)) {
-      if (typeof tx?.txid !== "string" || !tx.txid || tx.txid.length > 256 || /\s/.test(tx.txid) || /^(?:0x)?0+$/i.test(tx.txid)) continue;
-      const raw = Number(tx.timestamp), suppliedTime = raw < 1e12 ? raw * 1000 : raw;
-      const estimated = (!Number.isFinite(suppliedTime) || suppliedTime <= 0) && tx.status === "pending";
-      const timestamp = estimated ? Date.now() : suppliedTime;
-      if (!Number.isFinite(timestamp) || timestamp <= 0) { unknownConfirmedTimestamps++; continue; }
-      if (timestamp > Date.now() + 60_000) continue;
-      for (const owner of owners) {
-       // One-second overlap protects second-resolution block timestamps at the
-       // watch-registration boundary. Stable IDs make that overlap idempotent.
-       if (timestamp < owner.since - 1_000) continue;
-       const names: Array<"tx:incoming" | "tx:confirmed"> = tx.status === "confirmed" ? ["tx:incoming", "tx:confirmed"] : ["tx:incoming"];
-       for (const eventName of names) {
-        const eventId = createHash("sha256").update(`${watchKey(owner)}:${tx.txid}:${eventName}`).digest("hex");
-        incoming.push({ clientId: owner.clientId, walletScope: owner.walletScope, eventId, eventName,
-         payload: { address: owner.address, watchAddress: owner.address, networkId: owner.networkId, txid: tx.txid,
-          eventId, cursor: Date.now(), ...(estimated ? { timestampEstimated: true } : {}), refreshHint: true, reason: "durable-monitor", type: eventName === "tx:confirmed" ? "confirmation_update" : "activity" } });
+     const clients = new Set(batch.flat().map(owner => owner.clientId));
+     const result: any = await providerContext.run({ source: "background_monitor", ...(clients.size === 1 ? { clientId: [...clients][0] } : {}) },
+      () => this.history.getTransactionHistory({ queries: batch.map(owners => ({ caip: nativeCaip.get(owners[0].networkId)!, pubkey: owners[0].address })) }, { forceRefresh: true }));
+     for (let item = 0; item < batch.length; item++) {
+      const owners = batch[item];
+      const txs = result?.histories?.[item]?.transactions;
+      if (!Array.isArray(txs)) { failures++; continue; }
+      if (txs.length >= 50) possiblyTruncated++;
+      for (const tx of txs.slice(0, 200)) {
+       if (typeof tx?.txid !== "string" || !tx.txid || tx.txid.length > 256 || /\s/.test(tx.txid) || /^(?:0x)?0+$/i.test(tx.txid)) continue;
+       const raw = Number(tx.timestamp), suppliedTime = raw < 1e12 ? raw * 1000 : raw;
+       const estimated = (!Number.isFinite(suppliedTime) || suppliedTime <= 0) && tx.status === "pending";
+       const timestamp = estimated ? Date.now() : suppliedTime;
+       if (!Number.isFinite(timestamp) || timestamp <= 0) { unknownConfirmedTimestamps++; continue; }
+       if (timestamp > Date.now() + 60_000) continue;
+       for (const owner of owners) {
+        // One-second overlap protects second-resolution block timestamps at the
+        // watch-registration boundary. Stable IDs make that overlap idempotent.
+        if (timestamp < owner.since - 1_000) continue;
+        const names: Array<"tx:incoming" | "tx:confirmed"> = tx.status === "confirmed" ? ["tx:incoming", "tx:confirmed"] : ["tx:incoming"];
+        for (const eventName of names) {
+         const eventId = createHash("sha256").update(`${watchKey(owner)}:${tx.txid}:${eventName}`).digest("hex");
+         incoming.push({ clientId: owner.clientId, walletScope: owner.walletScope, eventId, eventName,
+          payload: { address: owner.address, watchAddress: owner.address, networkId: owner.networkId, txid: tx.txid,
+           eventId, cursor: Date.now(), ...(estimated ? { timestampEstimated: true } : {}), refreshHint: true, reason: "durable-monitor", type: eventName === "tx:confirmed" ? "confirmation_update" : "activity" } });
+        }
        }
       }
      }
-    } catch { failures++; } // Provider-controlled errors may contain wallet data.
+    } catch { failures += batch.length; } // Provider-controlled errors may contain wallet data.
    }
   }));
   for (let index = 0; index < incoming.length; index += 500) {

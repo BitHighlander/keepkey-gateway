@@ -1,3 +1,4 @@
+import { ProviderMetrics } from "./src/provider-metrics";
 import { loadConfig } from "./src/config";
 import { createDatabase } from "./src/database";
 import { createApp } from "./src/http";
@@ -29,8 +30,11 @@ const database = createDatabase(config);
 await database.migrate();
 await database.ping();
 
+const providerMetrics = new ProviderMetrics(rows => database.recordProviderUsage(rows));
+providerMetrics.start();
+
 const zerion = config.zerionApiKey
-	? new ZerionClient({ apiKey: config.zerionApiKey, cache: database })
+	? new ZerionClient({ apiKey: config.zerionApiKey, cache: database, metrics: providerMetrics })
 	: undefined;
 const evm = config.nownodesApiKey
 	? new EvmClient({ apiKey: config.nownodesApiKey, cache: database })
@@ -145,6 +149,7 @@ async function shutdown(signal: string): Promise<void> {
 	// Clients reconnect; force-close network sessions before releasing Postgres.
 	realtime.close();
 	server.stop(true);
+	await providerMetrics.close();
 	await database.close();
 }
 

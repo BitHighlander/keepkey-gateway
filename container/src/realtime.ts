@@ -1,3 +1,4 @@
+import { providerContext } from "./provider-metrics";
 import { createHash } from "node:crypto";
 import type { HistoryClient } from "./history";
 import type { LiveWatchFeed } from "./blockbook-live";
@@ -180,7 +181,7 @@ export class RealtimeHub {
   for (const batch of batches) {
    if (generation !== this.generation) break;
    try {
-    const result: any = await this.history.getTransactionHistory({ queries: batch.map(r => ({ caip: r.caip, pubkey: r.watch.address })) }, { forceRefresh: true });
+    const result: any = await providerContext.run({ source: "realtime_poll" }, () => this.history.getTransactionHistory({ queries: batch.map(r => ({ caip: r.caip, pubkey: r.watch.address })) }, { forceRefresh: true }));
     if (generation !== this.generation) break;
     const histories = Array.isArray(result?.histories) ? result.histories : [];
     batch.forEach((record, index) => {

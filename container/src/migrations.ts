@@ -201,4 +201,17 @@ export const migrations: readonly Migration[] = [
 			`CREATE INDEX IF NOT EXISTS realtime_ack_receipts_expiry_idx ON realtime_ack_receipts (expires_at)`,
 		],
 	},
+	{
+		version: 8,
+		name: "provider_usage_metrics",
+		statements: [
+			`CREATE TABLE IF NOT EXISTS provider_usage_minute (
+				bucket timestamptz NOT NULL, instance_id uuid NOT NULL, provider text NOT NULL,
+				source text NOT NULL, client_id text NOT NULL, operation text NOT NULL,
+				outcome text NOT NULL, forced boolean NOT NULL, status integer NOT NULL,
+				count bigint NOT NULL, duration_ms bigint NOT NULL,
+				PRIMARY KEY (bucket, instance_id, provider, source, client_id, operation, outcome, forced, status)
+			)`,
+		],
+	},
 ];

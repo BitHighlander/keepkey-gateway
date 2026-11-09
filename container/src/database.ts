@@ -1,3 +1,4 @@
+import type { ProviderUsage } from "./provider-metrics";
 import { SQL } from "bun";
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { PersistentCache } from "./cache";
@@ -29,6 +30,7 @@ export interface StoredPendingSwap {
 
 export interface Database extends PersistentCache {
 	realtime?: DurableRealtimeStore;
+	recordProviderUsage(rows: ProviderUsage[]): Promise<void>;
 	migrate(): Promise<void>;
 	ping(): Promise<void>;
 	registerClient(input: RegisterClientInput): Promise<RegisteredClient>;
@@ -59,6 +61,7 @@ export function createDatabase(config: AppConfig): Database {
 		idleTimeout: 120,
 		connectionTimeout: 5,
 	});
+	let providerPruneAt = 0;
 	const cacheConnection = new AsyncLocalStorage<Awaited<ReturnType<typeof sql.reserve>>>();
 
 	return {
@@ -79,6 +82,27 @@ export function createDatabase(config: AppConfig): Database {
 					await tx`INSERT INTO schema_migrations (version, name) VALUES (${migration.version}, ${migration.name})`;
 				});
 			}
+		},
+
+		async recordProviderUsage(rows) {
+			await sql`
+				INSERT INTO provider_usage_minute (bucket, instance_id, provider, source, client_id, operation, outcome, forced, status, count, duration_ms)
+				SELECT bucket, "instanceId", provider, source, "clientId", operation, outcome, forced, status, count, "durationMs"
+				FROM jsonb_to_recordset(${JSON.stringify(rows)}::text::jsonb) AS r(
+				 bucket timestamptz, "instanceId" uuid, provider text, source text, "clientId" text,
+				 operation text, outcome text, forced boolean, status integer, count bigint, "durationMs" bigint)
+				ON CONFLICT (bucket, instance_id, provider, source, client_id, operation, outcome, forced, status)
+				DO UPDATE SET count = GREATEST(provider_usage_minute.count, EXCLUDED.count),
+				 duration_ms = GREATEST(provider_usage_minute.duration_ms, EXCLUDED.duration_ms)
+			`;
+			if (Date.now() - providerPruneAt > 60 * 60_000) {
+				// Bounded retention work; the primary key starts with bucket.
+				await sql`DELETE FROM provider_usage_minute WHERE ctid IN (
+				 SELECT ctid FROM provider_usage_minute WHERE bucket < now() - interval '30 days' LIMIT 5000
+				)`;
+				providerPruneAt = Date.now();
+			}
+
 		},
 
 		async ping() {

@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { RealtimeMonitor } from "./realtime-monitor";
 import { RealtimeHub } from "./realtime";
+import { HistoryClient } from "./history";
+import { ZerionClient } from "./zerion";
 import { createApp } from "./http";
 import type { AppConfig } from "./config";
 import type { Database } from "./database";
@@ -56,4 +58,36 @@ test('durable pending transactions without a block timestamp remain refresh hint
  await monitor.register('owner',{walletScope:'wallet-one',addresses:[watch],enabled:true});
  const result:any=await monitor.tick(); expect(result.queued).toBe(1); expect(result.diagnostics).toMatchObject({historyCoverage:'latest-provider-page',possiblyTruncated:1});
  expect(f.events[0].payload).toMatchObject({timestampEstimated:true,refreshHint:true}); expect(f.events[0].payload.value).toBeUndefined();
+});
+
+test('durable EVM monitoring fetches once per wallet across chains and preserves every owner and network', async () => {
+ const f = storeFixture(), urls: string[] = [];
+ const address = `0x${'1'.repeat(40)}`, otherAddress = `0x${'2'.repeat(40)}`;
+ const networks = ['eip155:1', 'eip155:10', 'eip155:8453'];
+ const chainIds = ['ethereum', 'optimism', 'base'];
+ const zerion = new ZerionClient({ apiKey: 'fixture', fetch: (async input => {
+  const url = String(input); urls.push(url); await Bun.sleep(1);
+  if (url.endsWith('/chains/')) return Response.json({ data: chainIds.map((id, i) => ({ id, attributes: { external_id: `0x${BigInt(networks[i].split(':')[1]).toString(16)}` } })) });
+  return Response.json({ data: chainIds.map((id, i) => ({ attributes: { hash: `0x${String(i+1).repeat(64)}`, status: 'confirmed', operation_type: 'receive', mined_at: new Date().toISOString() }, relationships: { chain: { data: { id } } } })) });
+ }) as typeof fetch });
+ const monitor = new RealtimeMonitor(new HistoryClient({ zerion }), f.store, () => {});
+ for (const owner of ['one', 'two']) await monitor.register(owner, { walletScope: 'wallet', enabled: true, addresses: networks.map(networkId => ({ networkId, address })) });
+ await monitor.register('three', { walletScope: 'wallet', enabled: true, addresses: [{ networkId: networks[0], address: otherAddress }] });
+ const result = await monitor.tick();
+ expect(result).toEqual({ watches: 7, queued: 14, failures: 0 });
+ expect(urls.filter(url => url.includes('/transactions/'))).toHaveLength(2);
+ expect(new Set(f.events.filter(event => event.clientId === 'one').map(event => event.payload.networkId)).size).toBe(3);
+ expect(f.events.filter(event => event.clientId === 'two')).toHaveLength(6);
+ expect((await monitor.tick()).queued).toBe(0);
+ expect(urls.filter(url => url.includes('/transactions/'))).toHaveLength(4); // fresh next tick
+});
+
+test('one chain failure in an EVM batch preserves successful chain delivery and failure counts', async () => {
+ const f = storeFixture(), address = `0x${'1'.repeat(40)}`;
+ const monitor = new RealtimeMonitor({ getTransactionHistory: async () => ({ histories: [
+  { transactions: [{ txid: 'public-fixture-tx', status: 'confirmed', timestamp: Date.now() }] },
+  { error: { code: 'provider_unavailable' } },
+ ] }) } as any, f.store, () => {});
+ await monitor.register('one', { walletScope: 'wallet', enabled: true, addresses: ['eip155:1', 'eip155:10'].map(networkId => ({ networkId, address })) });
+ expect(await monitor.tick()).toEqual({ watches: 2, queued: 2, failures: 1 });
 });

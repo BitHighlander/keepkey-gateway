@@ -40,6 +40,7 @@ function fakeDatabase(): Database & { rows: Map<string, StoredPendingSwap> } {
 		},
 		async migrate() {}, async ping() {}, async close() {},
 		async registerClient() { throw new Error("unused"); }, async authenticate() { return null; },
+		async recordProviderUsage() {},
 		async recordVaultTelemetry() { return 0; },
 		async reserveHiveClaim() { return false; }, async completeHiveClaim() {}, async releaseHiveClaim() {},
 		async getFresh() { return null; }, async getStale() { return null; }, async set() {}, async runExclusive(_key, task) { return task(); },
