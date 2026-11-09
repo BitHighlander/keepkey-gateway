@@ -1,3 +1,4 @@
+import { providerContext } from "./provider-metrics";
 import { constants as zlibConstants } from "node:zlib";
 import buildInfo from "../data/build-info.json";
 import type { AppConfig } from "./config";
@@ -94,8 +95,9 @@ function queryBoolean(url: URL, name: string): boolean {
 
 export function createApp({ config, database, zerion, evm, market, utxo, portfolio, history, account, solana, catalog, quoteRouter, pendingSwaps, cosmosFeatures, hive, telemetry, multichainBroadcast, realtime, realtimeMonitor }: AppDependencies): { fetch(request: Request): Promise<Response> } {
 	return {
-		async fetch(request) {
+		fetch: request => providerContext.run({ source: "http" }, async () => {
 			const requestId = request.headers.get("x-request-id") || crypto.randomUUID();
+			providerContext.getStore()!.requestId = requestId;
 			const url = new URL(request.url);
 			const startedAt = performance.now();
 
@@ -183,6 +185,7 @@ export function createApp({ config, database, zerion, evm, market, utxo, portfol
 				const authenticated = async (): Promise<{ id: string; username: string }> => {
 					const client = key ? await database.authenticate(key) : null;
 					if (!client) throw new HttpError(401, "unauthorized", "A registered Pioneer query key is required");
+					providerContext.getStore()!.clientId = client.id;
 					return client;
 				};
 
@@ -494,6 +497,6 @@ export function createApp({ config, database, zerion, evm, market, utxo, portfol
 			} finally {
 				console.log(JSON.stringify({ event: "request_complete", requestId, method: request.method, path: url.pathname, durationMs: Math.round((performance.now() - startedAt) * 100) / 100 }));
 			}
-		},
+		}),
 	};
 }

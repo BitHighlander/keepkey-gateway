@@ -1,3 +1,4 @@
+import type { ProviderMetrics, ZerionOperation } from "./provider-metrics";
 import type { PersistentCache } from "./cache";
 import chainData from "../data/chains.json";
 
@@ -15,6 +16,7 @@ const NATIVE_CAIP_BY_NETWORK = new Map(Object.entries(chainData as Record<string
 
 interface ZerionClientOptions {
 	apiKey: string;
+	metrics?: ProviderMetrics;
 	baseUrl?: string;
 	fetch?: typeof fetch;
 	cacheTtlMs?: number;
@@ -263,6 +265,7 @@ export function normalizeZerionTransactions(
 }
 
 export class ZerionClient {
+	private readonly metrics?: ProviderMetrics;
 	private readonly baseUrl: string;
 	private readonly fetcher: typeof fetch;
 	private readonly authorization: string;
@@ -277,6 +280,7 @@ export class ZerionClient {
 	private chainCache?: CacheEntry<Map<string, string>>;
 
 	constructor(options: ZerionClientOptions) {
+		this.metrics = options.metrics;
 		this.baseUrl = (options.baseUrl || ZERION_API_BASE).replace(/\/$/, "");
 		this.fetcher = options.fetch || fetch;
 		this.authorization = `Basic ${btoa(`${options.apiKey}:`)}`;
@@ -288,9 +292,9 @@ export class ZerionClient {
 		if (!EVM_ADDRESS.test(address)) throw new ZerionError("Invalid EVM address", 400);
 		const key = address.toLowerCase();
 		const cached = this.positionCache.get(key);
-		if (cached && cached.expiresAt > Date.now()) return cached.value;
+		if (cached && cached.expiresAt > Date.now()) { this.metrics?.record("defi_positions", "cache_memory"); return cached.value; }
 		const running = this.inFlight.get(key);
-		if (running) return running;
+		if (running) { this.metrics?.record("defi_positions", "cache_join"); return running; }
 
 		const request = this.loadPositions(key).finally(() => this.inFlight.delete(key));
 		this.inFlight.set(key, request);
@@ -301,15 +305,15 @@ export class ZerionClient {
 		if (!EVM_ADDRESS.test(address)) throw new ZerionError("Invalid EVM address", 400);
 		const key = address.toLowerCase();
 		const forced = this.walletInFlight.get(`force:${key}`);
-		if (forced) return forced;
+		if (forced) { this.metrics?.record("wallet_positions", "cache_join", { forced: options.forceRefresh === true }); return forced; }
 		if (options.forceRefresh) {
 			this.walletCache.delete(key);
 			return this.forceRead(this.walletInFlight, key, () => this.loadWalletPositions(key, true));
 		}
 		const cached = this.walletCache.get(key);
-		if (cached && cached.expiresAt > Date.now()) return cached.value;
+		if (cached && cached.expiresAt > Date.now()) { this.metrics?.record("wallet_positions", "cache_memory"); return cached.value; }
 		const running = this.walletInFlight.get(key);
-		if (running) return running;
+		if (running) { this.metrics?.record("wallet_positions", "cache_join"); return running; }
 		const request = this.loadWalletPositions(key).finally(() => this.walletInFlight.delete(key));
 		this.walletInFlight.set(key, request);
 		return request;
@@ -319,15 +323,15 @@ export class ZerionClient {
 		if (!EVM_ADDRESS.test(address)) throw new ZerionError("Invalid EVM address", 400);
 		const key = address.toLowerCase();
 		const forced = this.transactionInFlight.get(`force:${key}`);
-		if (forced) return forced;
+		if (forced) { this.metrics?.record("transactions", "cache_join", { forced: options.forceRefresh === true }); return forced; }
 		if (options.forceRefresh) {
 			this.transactionCache.delete(key);
 			return this.forceRead(this.transactionInFlight, key, () => this.loadTransactions(key, true));
 		}
 		const cached = this.transactionCache.get(key);
-		if (cached && cached.expiresAt > Date.now()) return cached.value;
+		if (cached && cached.expiresAt > Date.now()) { this.metrics?.record("transactions", "cache_memory"); return cached.value; }
 		const running = this.transactionInFlight.get(key);
-		if (running) return running;
+		if (running) { this.metrics?.record("transactions", "cache_join"); return running; }
 		const request = this.loadTransactions(key).finally(() => this.transactionInFlight.delete(key));
 		this.transactionInFlight.set(key, request);
 		return request;
@@ -335,7 +339,7 @@ export class ZerionClient {
 
 	private async loadTransactions(address: string, forceRefresh = false): Promise<ZerionTransaction[]> {
 		const persisted = forceRefresh ? null : await this.persistentCache?.getFresh<ZerionTransaction[]>("zerion_transactions", address);
-		if (persisted) return this.rememberTransactions(address, persisted);
+		if (persisted) { this.metrics?.record("transactions", "cache_persistent"); return this.rememberTransactions(address, persisted); }
 		const chainNetworkIds = await this.getChainNetworkIds();
 		const chainIds = [...chainNetworkIds.entries()]
 			.filter(([, networkId]) => VAULT_EVM_NETWORKS.has(networkId))
@@ -343,9 +347,9 @@ export class ZerionClient {
 			.sort();
 		const fetchAndStore = async (): Promise<ZerionTransaction[]> => {
 			const afterLock = forceRefresh ? null : await this.persistentCache?.getFresh<ZerionTransaction[]>("zerion_transactions", address);
-			if (afterLock) return this.rememberTransactions(address, afterLock);
+			if (afterLock) { this.metrics?.record("transactions", "cache_persistent"); return this.rememberTransactions(address, afterLock); }
 			const params = new URLSearchParams({ currency: "usd", "page[size]": "50", "filter[trash]": "only_non_trash", "filter[chain_ids]": chainIds.join(",") });
-			const body = asObject(await this.request(`${this.baseUrl}/wallets/${address}/transactions/?${params}`));
+			const body = asObject(await this.request(`${this.baseUrl}/wallets/${address}/transactions/?${params}`, "transactions", forceRefresh));
 			const transactions = normalizeZerionTransactions(address, body.data, chainNetworkIds);
 			await this.persistentCache?.set("zerion_transactions", address, transactions, 15_000, 5 * 60_000, "zerion");
 			return this.rememberTransactions(address, transactions);
@@ -357,7 +361,7 @@ export class ZerionClient {
 		} catch (error) {
 			if (forceRefresh) throw error;
 			const stale = await this.persistentCache?.getStale<ZerionTransaction[]>("zerion_transactions", address);
-			if (stale) return this.rememberTransactions(address, stale);
+			if (stale) { this.metrics?.record("transactions", "cache_stale"); return this.rememberTransactions(address, stale); }
 			throw error;
 		}
 	}
@@ -376,6 +380,7 @@ export class ZerionClient {
 	private async loadWalletPositions(address: string, forceRefresh = false): Promise<ZerionWalletPosition[]> {
 		const persisted = forceRefresh ? null : await this.persistentCache?.getFresh<ZerionWalletPosition[]>("zerion_wallet_positions", address);
 		if (persisted) {
+			this.metrics?.record("wallet_positions", "cache_persistent");
 			this.rememberWallet(address, persisted);
 			return persisted;
 		}
@@ -387,11 +392,12 @@ export class ZerionClient {
 		const fetchAndStore = async (): Promise<ZerionWalletPosition[]> => {
 			const afterLock = forceRefresh ? null : await this.persistentCache?.getFresh<ZerionWalletPosition[]>("zerion_wallet_positions", address);
 			if (afterLock) {
+				this.metrics?.record("wallet_positions", "cache_persistent");
 				this.rememberWallet(address, afterLock);
 				return afterLock;
 			}
 			const params = new URLSearchParams({ currency: "usd", "filter[positions]": "only_simple", "filter[chain_ids]": chainIds.join(","), sort: "-value" });
-			const body = asObject(await this.request(`${this.baseUrl}/wallets/${address}/positions/?${params}`));
+			const body = asObject(await this.request(`${this.baseUrl}/wallets/${address}/positions/?${params}`, "wallet_positions", forceRefresh));
 			const positions = normalizeZerionWalletPositions(body.data, chainNetworkIds);
 			await this.persistentCache?.set("zerion_wallet_positions", address, positions, WALLET_FRESH_MS, WALLET_STALE_MS, "zerion");
 			this.rememberWallet(address, positions);
@@ -404,7 +410,7 @@ export class ZerionClient {
 		} catch (error) {
 			if (forceRefresh) throw error;
 			const stale = await this.persistentCache?.getStale<ZerionWalletPosition[]>("zerion_wallet_positions", address);
-			if (stale) return stale;
+			if (stale) { this.metrics?.record("wallet_positions", "cache_stale"); return stale; }
 			throw error;
 		}
 	}
@@ -430,6 +436,7 @@ export class ZerionClient {
 	private async loadPositions(address: string): Promise<DefiPosition[]> {
 		const persisted = await this.persistentCache?.getFresh<DefiPosition[]>("zerion_positions", address);
 		if (persisted) {
+			this.metrics?.record("defi_positions", "cache_persistent");
 			this.rememberPositions(address, persisted);
 			return persisted;
 		}
@@ -438,10 +445,11 @@ export class ZerionClient {
 		const fetchAndStore = async (): Promise<DefiPosition[]> => {
 			const afterLock = await this.persistentCache?.getFresh<DefiPosition[]>("zerion_positions", address);
 			if (afterLock) {
+				this.metrics?.record("defi_positions", "cache_persistent");
 				this.rememberPositions(address, afterLock);
 				return afterLock;
 			}
-			const response = await this.request(`${this.baseUrl}/wallets/${address}/positions/?currency=usd&filter%5Bpositions%5D=only_complex&sort=-value`);
+			const response = await this.request(`${this.baseUrl}/wallets/${address}/positions/?currency=usd&filter%5Bpositions%5D=only_complex&sort=-value`, "defi_positions");
 			const body = asObject(response);
 			const positions = normalizeZerionPositions(address, body.data, chainNetworkIds);
 			await this.persistentCache?.set("zerion_positions", address, positions, this.cacheTtlMs, POSITION_STALE_MS, "zerion");
@@ -465,7 +473,7 @@ export class ZerionClient {
 	}
 
 	private async fetchChainNetworkIds(): Promise<Map<string, string>> {
-		const body = asObject(await this.request(`${this.baseUrl}/chains/`));
+		const body = asObject(await this.request(`${this.baseUrl}/chains/`, "chains"));
 		const map = new Map<string, string>();
 		for (const raw of Array.isArray(body.data) ? body.data : []) {
 			const item = asObject(raw);
@@ -499,15 +507,26 @@ export class ZerionClient {
 			: this.fetchChainNetworkIds();
 	}
 
-	private async request(url: string): Promise<unknown> {
-		const response = await this.fetcher(url, {
-			headers: { Accept: "application/json", Authorization: this.authorization },
-			signal: AbortSignal.timeout(15_000),
-		});
-		if (!response.ok) {
-			const retryAfter = response.headers.get("retry-after");
-			throw new ZerionError(`Zerion request failed (${response.status})${retryAfter ? `; retry after ${retryAfter}` : ""}`, response.status);
+	private async request(url: string, operation: ZerionOperation, forced = false): Promise<unknown> {
+		const startedAt = performance.now();
+		let status = 0, outcome = "upstream_network_error";
+		try {
+			const response = await this.fetcher(url, {
+				headers: { Accept: "application/json", Authorization: this.authorization },
+				signal: AbortSignal.timeout(15_000),
+			});
+			status = response.status;
+			if (!response.ok) {
+				outcome = "upstream_http_error";
+				const retryAfter = response.headers.get("retry-after");
+				throw new ZerionError(`Zerion request failed (${response.status})${retryAfter ? `; retry after ${retryAfter}` : ""}`, response.status);
+			}
+			outcome = "upstream_decode_error";
+			const body = await response.json();
+			outcome = "upstream_ok";
+			return body;
+		} finally {
+			this.metrics?.record(operation, outcome, { forced, status, durationMs: performance.now() - startedAt });
 		}
-		return response.json();
 	}
 }
