@@ -174,6 +174,8 @@ export function openApiDocument(requestUrl: string): Record<string, unknown> {
 											items: { type: "object", required: ["caip", "pubkey"], properties: { caip: { type: "string" }, pubkey: { type: "string" } } },
 										},
 										includeDefi: { type: "boolean" },
+                                        providerRefreshPolicy: {type:"string",enum:["cache-only","on-demand"]},
+                                        refreshReason: {type:"string"},
 										extraContracts: {
 											type: "array",
 											maxItems: 20,
@@ -211,6 +213,8 @@ export function openApiDocument(requestUrl: string): Record<string, unknown> {
 							properties: {
 								queries: { type: "array", minItems: 1, maxItems: 100, items: { type: "object", required: ["caip", "pubkey"], properties: { caip: { type: "string" }, pubkey: { type: "string" } } } },
 								page: { type: "integer", minimum: 1 },
+                                providerRefreshPolicy: {type:"string",enum:["cache-only","on-demand"]},
+                                refreshReason: {type:"string"},
 							},
 						} } },
 					},

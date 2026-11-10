@@ -93,6 +93,15 @@ function queryBoolean(url: URL, name: string): boolean {
 	throw new HttpError(400, "invalid_query", `${name} must be true or false`);
 }
 
+function applyProviderRefreshPolicy(body:any):void {
+                    const policy=body.providerRefreshPolicy;
+                    if(policy!==undefined && policy!=="cache-only" && policy!=="on-demand") throw new HttpError(400,"invalid_refresh_policy","Invalid provider refresh policy");
+                    providerContext.getStore()!.cacheOnly=policy==="cache-only";
+                    const reason=body.refreshReason;
+                    providerContext.getStore()!.refreshReason=['wallet-open','manual','automatic','focus','swap-reconcile','degraded-retry'].includes(reason)?reason:reason===undefined?'legacy':'unknown';
+                    if(!['wallet-open','manual','legacy'].includes(providerContext.getStore()!.refreshReason!))providerContext.getStore()!.cacheOnly=true;
+}
+
 export function createApp({ config, database, zerion, evm, market, utxo, portfolio, history, account, solana, catalog, quoteRouter, pendingSwaps, cosmosFeatures, hive, telemetry, multichainBroadcast, realtime, realtimeMonitor }: AppDependencies): { fetch(request: Request): Promise<Response> } {
 	return {
 		fetch: request => providerContext.run({ source: "http" }, async () => {
@@ -318,12 +327,7 @@ export function createApp({ config, database, zerion, evm, market, utxo, portfol
 					if (!portfolio) throw new HttpError(503, "feature_unavailable", "Portfolio aggregation is not configured");
 					const client = await authenticated();
 					const body = await bodyObject(request) as unknown as PortfolioRequest;
-                    const policy=(body as any).providerRefreshPolicy;
-                    if(policy!==undefined && policy!=="cache-only" && policy!=="on-demand") throw new HttpError(400,"invalid_refresh_policy","Invalid provider refresh policy");
-                    providerContext.getStore()!.cacheOnly=policy==="cache-only";
-                    const reason=(body as any).refreshReason;
-                    providerContext.getStore()!.refreshReason=['wallet-open','manual','automatic','focus','swap-reconcile','degraded-retry'].includes(reason)?reason:reason===undefined?'legacy':'unknown';
-                    if(!['wallet-open','manual','legacy'].includes(providerContext.getStore()!.refreshReason!))providerContext.getStore()!.cacheOnly=true;
+                    applyProviderRefreshPolicy(body);
 					const balances = await portfolio.getBalances(body, { forceRefresh: queryBoolean(url, "forceRefresh") });
 					realtime?.rememberPortfolio(client.id, body.pubkeys);
 					return json(balances, 200, requestId, { "Cache-Control": "no-store" });
@@ -333,6 +337,7 @@ export function createApp({ config, database, zerion, evm, market, utxo, portfol
 					if (!history) throw new HttpError(503, "feature_unavailable", "Transaction history is not configured");
 					await authenticated();
 					const body = await bodyObject(request) as unknown as HistoryRequest;
+                    applyProviderRefreshPolicy(body);
 					return json(await history.getTransactionHistory(body, { forceRefresh: queryBoolean(url, "forceRefresh") }), 200, requestId, { "Cache-Control": "no-store" });
 				}
 
