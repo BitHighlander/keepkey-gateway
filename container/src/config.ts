@@ -1,3 +1,4 @@
+import { DEFAULT_ZERION_LIMITS, type ProviderBudgetLimits } from './provider-budget';
 import type { SwapProviderOptions } from './swap';
 export interface AppConfig {
 	swapProviders?: SwapProviderOptions;
@@ -5,6 +6,7 @@ export interface AppConfig {
 	databaseUrl: string;
 	databaseMaxConnections: number;
 	zerionApiKey?: string;
+	zerionLimits?: ProviderBudgetLimits;
 	nownodesApiKey?: string;
 	realtimeSchedulerSecret?: string;
 	coingeckoApiKey?: string;
@@ -47,6 +49,11 @@ export function loadConfig(env: Environment = process.env): AppConfig {
 		databaseUrl,
 		databaseMaxConnections: integer(env, "DATABASE_MAX_CONNECTIONS", 5, 1, 20),
 		zerionApiKey: env.ZERION_API_KEY?.trim() || undefined,
+        zerionLimits: {
+          minute: integer(env, 'ZERION_REQUESTS_PER_MINUTE', DEFAULT_ZERION_LIMITS.minute, 1, 1000),
+          day: integer(env, 'ZERION_REQUESTS_PER_DAY', DEFAULT_ZERION_LIMITS.day, 1, 10000),
+          month: integer(env, 'ZERION_REQUESTS_PER_MONTH', DEFAULT_ZERION_LIMITS.month, 1, 250000),
+        },
 		nownodesApiKey: env.NOWNODES_API_KEY?.trim() || undefined,
 		realtimeSchedulerSecret: env.REALTIME_SCHEDULER_SECRET?.trim() || undefined,
 		coingeckoApiKey: env.COINGECKO_API_KEY?.trim() || undefined,

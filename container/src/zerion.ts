@@ -17,6 +17,7 @@ const NATIVE_CAIP_BY_NETWORK = new Map(Object.entries(chainData as Record<string
 interface ZerionClientOptions {
 	apiKey: string;
 	metrics?: ProviderMetrics;
+ beforeRequest?: () => Promise<void>;
 	baseUrl?: string;
 	fetch?: typeof fetch;
 	cacheTtlMs?: number;
@@ -266,6 +267,7 @@ export function normalizeZerionTransactions(
 
 export class ZerionClient {
 	private readonly metrics?: ProviderMetrics;
+ private readonly beforeRequest?: () => Promise<void>;
 	private readonly baseUrl: string;
 	private readonly fetcher: typeof fetch;
 	private readonly authorization: string;
@@ -281,6 +283,7 @@ export class ZerionClient {
 
 	constructor(options: ZerionClientOptions) {
 		this.metrics = options.metrics;
+        this.beforeRequest = options.beforeRequest;
 		this.baseUrl = (options.baseUrl || ZERION_API_BASE).replace(/\/$/, "");
 		this.fetcher = options.fetch || fetch;
 		this.authorization = `Basic ${btoa(`${options.apiKey}:`)}`;
@@ -291,6 +294,12 @@ export class ZerionClient {
 	async getDefiPositions(address: string): Promise<DefiPosition[]> {
 		if (!EVM_ADDRESS.test(address)) throw new ZerionError("Invalid EVM address", 400);
 		const key = address.toLowerCase();
+        if (providerContext.getStore()?.cacheOnly) {
+          const value = this.positionCache.get(key)?.value ?? await this.persistentCache?.getStale<DefiPosition[]>("zerion_positions", key);
+          if (value !== undefined && value !== null) { this.metrics?.record("defi_positions","cache_only"); return value; }
+          this.metrics?.record("defi_positions","policy_blocked");
+          throw new ZerionError("No cached provider snapshot; open the wallet or refresh explicitly",409);
+        }
 		const cached = this.positionCache.get(key);
 		if (cached && cached.expiresAt > Date.now()) { this.metrics?.record("defi_positions", "cache_memory"); return cached.value; }
 		const running = this.inFlight.get(key);
@@ -304,6 +313,12 @@ export class ZerionClient {
 	async getWalletPositions(address: string, options: { forceRefresh?: boolean } = {}): Promise<ZerionWalletPosition[]> {
 		if (!EVM_ADDRESS.test(address)) throw new ZerionError("Invalid EVM address", 400);
 		const key = address.toLowerCase();
+        if (providerContext.getStore()?.cacheOnly) {
+          const value = this.walletCache.get(key)?.value ?? await this.persistentCache?.getStale<ZerionWalletPosition[]>("zerion_wallet_positions", key);
+          if (value !== undefined && value !== null) { this.metrics?.record("wallet_positions","cache_only"); return value; }
+          this.metrics?.record("wallet_positions","policy_blocked");
+          throw new ZerionError("No cached provider snapshot; open the wallet or refresh explicitly",409);
+        }
 		const forced = this.walletInFlight.get(`force:${key}`);
 		if (forced) { this.metrics?.record("wallet_positions", "cache_join", { forced: options.forceRefresh === true }); return forced; }
 		if (options.forceRefresh) {
@@ -322,6 +337,12 @@ export class ZerionClient {
 	async getTransactions(address: string, options: { forceRefresh?: boolean } = {}): Promise<ZerionTransaction[]> {
 		if (!EVM_ADDRESS.test(address)) throw new ZerionError("Invalid EVM address", 400);
 		const key = address.toLowerCase();
+        if (providerContext.getStore()?.cacheOnly) {
+          const value = this.transactionCache.get(key)?.value ?? await this.persistentCache?.getStale<ZerionTransaction[]>("zerion_transactions", key);
+          if (value !== undefined && value !== null) { this.metrics?.record("transactions","cache_only"); return value; }
+          this.metrics?.record("transactions","policy_blocked");
+          throw new ZerionError("No cached provider snapshot; open the wallet or refresh explicitly",409);
+        }
 		const forced = this.transactionInFlight.get(`force:${key}`);
 		if (forced) { this.metrics?.record("transactions", "cache_join", { forced: options.forceRefresh === true }); return forced; }
 		if (options.forceRefresh) {
@@ -509,11 +530,16 @@ export class ZerionClient {
 
 	private async request(url: string, operation: ZerionOperation, forced = false): Promise<unknown> {
 		const source = providerContext.getStore()?.source;
-		if (source === "background_monitor" || source === "realtime_poll") {
+		if (source === "background_monitor" || source === "realtime_poll" || providerContext.getStore()?.cacheOnly) {
 			this.metrics?.record(operation, "policy_blocked", { forced });
 			throw new ZerionError("Zerion reads require an on-demand request", 409);
 		}
-		const startedAt = performance.now();
+		try { await this.beforeRequest?.(); }
+        catch(error) {
+          this.metrics?.record(operation,"budget_blocked",{forced});
+          throw new ZerionError("Provider request budget unavailable; cached balances are retained", (error as any)?.status===429 ? 429 : 503);
+        }
+        const startedAt = performance.now();
 		let status = 0, outcome = "upstream_network_error";
 		try {
 			const response = await this.fetcher(url, {

@@ -1,3 +1,4 @@
+import { reserveProviderRequest, DEFAULT_ZERION_LIMITS } from './provider-budget';
 import type { ProviderUsage } from "./provider-metrics";
 import { SQL } from "bun";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -31,6 +32,8 @@ export interface StoredPendingSwap {
 export interface Database extends PersistentCache {
 	realtime?: DurableRealtimeStore;
 	recordProviderUsage(rows: ProviderUsage[]): Promise<void>;
+ reserveZerionRequest(): Promise<void>;
+ getProviderUsage(): Promise<Record<string,unknown>>;
 	migrate(): Promise<void>;
 	ping(): Promise<void>;
 	registerClient(input: RegisterClientInput): Promise<RegisteredClient>;
@@ -84,16 +87,32 @@ export function createDatabase(config: AppConfig): Database {
 			}
 		},
 
-		async recordProviderUsage(rows) {
+		async getProviderUsage() {
+         const limits=config.zerionLimits || DEFAULT_ZERION_LIMITS;
+         const rows=await sql`SELECT window_kind, used FROM provider_request_budgets WHERE provider='zerion'
+          AND window_start = (date_trunc(window_kind,now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')`;
+         const windows=Object.entries(limits).map(([kind,limit])=>({kind,limit,used:Number(rows.find((row:any)=>row.window_kind===kind)?.used || 0)}));
+         const highest=Math.max(...windows.map(row=>row.used/row.limit));
+         return {provider:'zerion',state:highest>=1?'limited':highest>=0.8?'warning':'normal',windows};
+        },
+        async reserveZerionRequest() {
+         const inherited=cacheConnection.getStore();
+         const reserved=inherited || await sql.reserve();
+         try { await reserveProviderRequest(reserved as unknown as SQL, config.zerionLimits || DEFAULT_ZERION_LIMITS); }
+         finally { if(!inherited) reserved.release(); }
+        },
+        async recordProviderUsage(rows) {
 			await sql`
-				INSERT INTO provider_usage_minute (bucket, instance_id, provider, source, client_id, operation, outcome, forced, status, count, duration_ms)
-				SELECT bucket, "instanceId", provider, source, "clientId", operation, outcome, forced, status, count, "durationMs"
+				INSERT INTO provider_usage_minute (bucket, instance_id, provider, source, client_id, operation, outcome, forced, status, count, duration_ms, credential_id, refresh_reason)
+				SELECT bucket, "instanceId", provider, source, "clientId", operation, outcome, forced, status, count, "durationMs", "credentialId", "refreshReason"
 				FROM jsonb_to_recordset(${JSON.stringify(rows)}::text::jsonb) AS r(
 				 bucket timestamptz, "instanceId" uuid, provider text, source text, "clientId" text,
-				 operation text, outcome text, forced boolean, status integer, count bigint, "durationMs" bigint)
+				 operation text, outcome text, forced boolean, status integer, count bigint, "durationMs" bigint, "credentialId" text, "refreshReason" text)
 				ON CONFLICT (bucket, instance_id, provider, source, client_id, operation, outcome, forced, status)
 				DO UPDATE SET count = GREATEST(provider_usage_minute.count, EXCLUDED.count),
-				 duration_ms = GREATEST(provider_usage_minute.duration_ms, EXCLUDED.duration_ms)
+				 duration_ms = GREATEST(provider_usage_minute.duration_ms, EXCLUDED.duration_ms),
+                 credential_id=EXCLUDED.credential_id,
+                 refresh_reason=CASE WHEN provider_usage_minute.refresh_reason=EXCLUDED.refresh_reason THEN EXCLUDED.refresh_reason ELSE 'mixed' END
 			`;
 			if (Date.now() - providerPruneAt > 60 * 60_000) {
 				// Bounded retention work; the primary key starts with bucket.

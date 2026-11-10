@@ -5,6 +5,18 @@ import { ZerionClient } from "./zerion";
 const ADDRESS = `0x${"1".repeat(40)}`;
 const chains = { data: [{ id: "ethereum", attributes: { external_id: "0x1" } }] };
 
+test('budget failure prevents every physical fetch, and automatic cache reads spend nothing',async()=>{
+ let fetches=0,reservations=0,deny=false;
+ const client=new ZerionClient({apiKey:'fixture',beforeRequest:async()=>{reservations++;if(deny)throw Error('budget store down');},fetch:(async(input:string|URL|Request)=>{fetches++;return Response.json(String(input).endsWith('/chains/')?chains:{data:[]});}) as typeof fetch});
+ await providerContext.run({source:'http'},()=>client.getWalletPositions(ADDRESS));
+ expect(fetches).toBe(2);expect(reservations).toBe(2);
+ deny=true;
+ await providerContext.run({source:'http',cacheOnly:true},()=>client.getWalletPositions(ADDRESS,{forceRefresh:true}));
+ expect(fetches).toBe(2);expect(reservations).toBe(2);
+ await expect(providerContext.run({source:'http'},()=>client.getWalletPositions(ADDRESS,{forceRefresh:true}))).rejects.toThrow('budget');
+ expect(fetches).toBe(2);
+});
+
 test("Zerion blocks paid fetches from background contexts while on-demand reads still work", async () => {
  let fetches=0;
  const writes:ProviderUsage[][]=[];
@@ -88,7 +100,7 @@ test("failed persistence retains cumulative snapshots and records calls arriving
  const final = metrics.flush(); expect(writes.at(-1)![0].count).toBe(2); release(); await final;
  now += 180_000;
  const expired = metrics.flush(); release(); await expired;
- const prior = writes.length; await metrics.flush(); expect(writes).toHaveLength(prior);
+ const prior = writes.length; const heartbeat=metrics.flush(); release(); await heartbeat; expect(writes).toHaveLength(prior+1); expect(writes.at(-1)!.every(row=>row.count===0)).toBe(true);
 });
 
 test("broken metrics storage and logger do not fail successful provider reads", async () => {

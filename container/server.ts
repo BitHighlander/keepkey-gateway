@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { ProviderMetrics } from "./src/provider-metrics";
 import { loadConfig } from "./src/config";
 import { createDatabase } from "./src/database";
@@ -31,11 +32,11 @@ const database = createDatabase(config);
 await database.migrate();
 await database.ping();
 
-const providerMetrics = new ProviderMetrics(rows => database.recordProviderUsage(rows));
+const providerMetrics = new ProviderMetrics(rows => database.recordProviderUsage(rows), undefined, Date.now, config.zerionApiKey ? createHash("sha256").update(config.zerionApiKey).digest("hex").slice(0,16) : "disabled");
 providerMetrics.start();
 
 const zerion = config.zerionApiKey
-	? new ZerionClient({ apiKey: config.zerionApiKey, cache: database, metrics: providerMetrics })
+	? new ZerionClient({ apiKey: config.zerionApiKey, cache: database, metrics: providerMetrics, beforeRequest: () => database.reserveZerionRequest() })
 	: undefined;
 const evm = config.nownodesApiKey
 	? new EvmClient({ apiKey: config.nownodesApiKey, cache: database })
