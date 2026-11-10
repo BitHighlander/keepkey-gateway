@@ -5,6 +5,27 @@ import { ZerionClient } from "./zerion";
 const ADDRESS = `0x${"1".repeat(40)}`;
 const chains = { data: [{ id: "ethereum", attributes: { external_id: "0x1" } }] };
 
+test("Zerion blocks paid fetches from background contexts while on-demand reads still work", async () => {
+ let fetches=0;
+ const writes:ProviderUsage[][]=[];
+ const metrics=new ProviderMetrics(async rows=>{writes.push(rows)},()=>{});
+ const client=new ZerionClient({apiKey:'fixture',metrics,fetch:(async url=>{
+  fetches++;return Response.json(String(url).endsWith('/chains/')?chains:{data:[]});
+ }) as typeof fetch});
+ const reads:Array<()=>Promise<unknown>>=[()=>client.getTransactions(ADDRESS,{forceRefresh:true}),()=>client.getWalletPositions(ADDRESS,{forceRefresh:true}),()=>client.getDefiPositions(ADDRESS)];
+ for(const source of ['background_monitor','realtime_poll'] as const){
+  for(const read of reads){
+   await expect(providerContext.run({source},read)).rejects.toThrow('on-demand');
+  }
+ }
+ expect(fetches).toBe(0);
+ await providerContext.run({source:'http',clientId:'wallet-open'},()=>client.getTransactions(ADDRESS,{forceRefresh:true}));
+ expect(fetches).toBe(2);
+ await metrics.flush();
+ expect(writes[0].filter(row=>row.outcome.startsWith('upstream_')).reduce((n,row)=>n+row.count,0)).toBe(2);
+ expect(writes[0].some(row=>row.outcome==='policy_blocked')).toBe(true);
+});
+
 test("counts physical fetches separately from joined and warm reads with isolated caller attribution", async () => {
  const writes: ProviderUsage[][] = [], logs: Record<string, unknown>[] = [];
  const metrics = new ProviderMetrics(async rows => { writes.push(rows); }, record => { logs.push(record); });
@@ -18,14 +39,14 @@ test("counts physical fetches separately from joined and warm reads with isolate
   providerContext.run({ source: "http", clientId: "client-two" }, () => client.getTransactions(ADDRESS)),
  ]);
  await client.getTransactions(ADDRESS);
- await providerContext.run({ source: "background_monitor" }, () => client.getTransactions(ADDRESS, { forceRefresh: true }));
+ await providerContext.run({ source: "http", clientId: "client-one" }, () => client.getTransactions(ADDRESS, { forceRefresh: true }));
  await metrics.flush();
  expect(calls).toBe(3); // chains, normal history, forced history
  const rows = writes[0];
  expect(rows.filter(row => row.outcome.startsWith("upstream_")).reduce((sum, row) => sum + row.count, 0)).toBe(calls);
  expect(rows.find(row => row.outcome === "cache_join")).toMatchObject({ clientId: "client-two", count: 1 });
  expect(rows.find(row => row.outcome === "cache_memory")).toMatchObject({ source: "unknown", count: 1 });
- expect(rows.find(row => row.forced)).toMatchObject({ operation: "transactions", source: "background_monitor", status: 200 });
+ expect(rows.find(row => row.forced)).toMatchObject({ operation: "transactions", source: "http", status: 200 });
  expect(JSON.stringify({ writes, logs })).not.toContain(ADDRESS);
  expect(JSON.stringify({ writes, logs })).not.toContain("secret-fixture");
 });

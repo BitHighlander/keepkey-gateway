@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import type { HistoryClient } from "./history";
 import type { LiveWatchFeed } from "./blockbook-live";
 import chains from "../data/chains.json";
-import { watchKey, type WatchAddress } from "./realtime-watch";
+import { watchKey, canPollHistory, type WatchAddress } from "./realtime-watch";
 export type { WatchAddress } from "./realtime-watch";
 const POLL_INTERVAL_MS = 15_000, MAX_ADDRESSES = 200, MAX_SEEN = 200, INVENTORY_TTL_MS = 10 * 60_000;
 const nativeCaip = new Map(Object.entries(chains as Record<string, any>).map(([id, c]) => [id, String(c.nativeAssetCaip || "")]));
@@ -173,10 +173,11 @@ export class RealtimeHub {
   if (this.polling || !this.subscriptions.size) return;
   this.polling = true; const generation = this.generation, forced = new Set(this.forceNetworks); this.forceNetworks.clear();
   const records = [...this.uniqueWatches().entries()].map(([key, watch]) => ({ key, watch, caip: nativeCaip.get(watch.networkId)! }))
+   .filter(r => canPollHistory(r.watch.networkId))
    .filter(r => !this.feed?.covers(r.watch) || forced.has(r.watch.networkId) || !this.snapshots.has(r.key) || [...this.subscriptions.values()].some(s => s.catchup.has(r.key)));
-  const batches: typeof records[] = [], evm = records.filter(r => r.watch.networkId.startsWith("eip155:"));
-  for (let i = 0; i < evm.length; i += 100) batches.push(evm.slice(i, i + 100));
-  batches.push(...records.filter(r => !r.watch.networkId.startsWith("eip155:")).map(r => [r]));
+  // EVM subscriptions retain push routing, but never start a Zerion history loop.
+  if (!records.length) { this.polling = false; return; }
+  const batches = records.map(record => [record]);
   let changed = false;
   for (const batch of batches) {
    if (generation !== this.generation) break;

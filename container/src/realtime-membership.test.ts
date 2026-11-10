@@ -54,6 +54,7 @@ describe('realtime lease membership', () => {
  });
 
  test('replacement drops the old watch and an old in-flight history response cannot leak', async () => {
+  const A={address:'LtcWatchA',networkId:'bip122:12a765e31ffd4059bada1e25190f6e98'},B={...A,address:'LtcWatchB'};
   let finishOld!: (value: any) => void, calls = 0;
   const h = setup(async body => {
    calls++;
@@ -98,6 +99,7 @@ describe('realtime lease membership', () => {
  });
 
  test('reconnect history catch-up is limited to its own subscription and since cursor', async () => {
+  const A={address:'LtcWatchA',networkId:'bip122:12a765e31ffd4059bada1e25190f6e98'};
   const now = Date.now();
   const h = setup(async body => ({ histories: body.queries.map(() => ({ transactions: [
    { txid: 'recent', status: 'confirmed', timestamp: now - 1_000 },

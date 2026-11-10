@@ -1,111 +1,71 @@
-# Zerion usage investigation and metrics
+# Zerion usage policy and investigation
 
-Read-only observations on 2026-11-09 UTC:
+Zerion reads are on demand: wallet opening and explicit portfolio/history refresh
+requests may fetch positions, DeFi data and history. SSE/socket subscriptions and
+durable payment watches must not repeatedly fetch Zerion history. EVM push hints
+and stored event replay remain available, but the gateway does not discover new
+EVM payments by polling Zerion. A push-based EVM notification source is separate
+work. UTXO monitoring continues through its existing providers.
 
-- `api.keepkey.info` served legacy Pioneer v1.4.5. `api-blue.keepkey.info`
-  served gateway revision `c350d52e93a115e8aede941f0d92edf85878dd9a`.
-- The Cloudflare-configured database had 72 enabled EVM registrations for
-  five unique addresses on nine chains, owned by one registered client.
-  Eight wallet scopes were enabled; the earliest scope update was November 5.
-- At 18:34:24 the transaction cache held approximately 222,217 total stored
-  versions, compared with 2,510 wallet-position and 259 DeFi-position versions.
-  Transaction versions reached 222,300 at the 18:37:41 inventory. These are
-  successful cache writes, not a historical billing counter; they omit errors,
-  deleted entries, and any other users of the Zerion key.
+The prior implementation forced wallet-wide history reads every 15 seconds for
+active realtime subscribers and saved watches, including when Vault was closed.
+An earlier batching patch reduced duplicate reads across chain groups but did
+not remove recurring requests. Both monitoring paths now exclude EVM history;
+the Zerion transport also refuses `background_monitor` and `realtime_poll`
+contexts before fetching. EVM-only durable ticks report zero polling watches,
+allowing the scheduler to disarm without deleting registrations or replay data.
+Registration responses report `backgroundMonitoring: false` for EVM-only watches
+and identify their `onDemandNetworks`.
 
-The durable monitor grouped work by address **and chain** and forced history
-reads every 15 seconds while watches remained enabled, including when Vault
-was closed. Zerion history is already across chains per wallet. In-flight
-coalescing only combined overlapping requests, so repeated chain groups could
-cause more requests after the earlier request completed. The monitor now
-batches all supported EVM chains for each address into one history call per
-tick, preserving individual chain results and owner delivery. For the observed
-inventory, that is five EVM history loads per tick instead of 45 chain groups.
-Actual upstream savings depend on timing and existing in-flight coalescing.
+Inventory on November 9 showed 72 EVM registrations, five distinct addresses,
+and one client. Around 222,000 stored transaction-cache versions were present.
+Cache versions are evidence of repeated work, not exact historical billing.
+The provider dashboard spike has not been fully reconciled to historical calls.
+Credential rotation was separately completed on November 10; the old key was
+verified unauthorized and the replacement accepted. No credentials are stored here.
 
-Active socket/SSE polling still runs separately at a 15-second cadence and can
-overlap durable monitoring. Explicit forced user refreshes retain their existing
-freshness semantics. Watch disabling, expiry policy and cadence are unchanged.
-The evidence identifies internal amplification; it does not establish key theft
-or exclude traffic outside this gateway. Compare provider dashboard usage for
-the same UTC window with `upstream_*` counts to investigate any difference.
+## Metrics
 
-## Recorded metrics
+Each physical Zerion fetch records operation, source, authenticated client ID
+when attributable, forced-refresh flag, HTTP status, duration, and outcome.
+`upstream_ok`, `upstream_http_error`, `upstream_network_error`, and
+`upstream_decode_error` count physical attempts. `cache_*` reuse and
+`policy_blocked` refusals do not count as upstream calls. Logs exclude raw keys,
+wallet addresses, provider URLs and response bodies.
 
-`ZerionClient.request` records exactly one attempt for each physical fetch,
-including failures. Counters distinguish chains, wallet positions, DeFi
-positions and transactions. Outcomes are `upstream_ok`, `upstream_http_error`,
-`upstream_network_error`, and `upstream_decode_error`; status 0 means no HTTP
-response. Durations include response-body decoding. Rate limits are status 429.
-
-Memory hits, persistent hits (including a hit after a cross-container lock),
-in-flight joins and stale fallbacks use separate `cache_*` outcomes and never
-inflate upstream attempt counts. Chain metadata reuse is not counted as a
-cache outcome. A failed upstream followed by stale fallback records both facts.
-
-Sources are `http`, `background_monitor`, `realtime_poll`, or `unknown`.
-HTTP attribution uses the authenticated database client ID. A durable batch
-with one owner client records that ID; a shared batch and live polling have
-an empty client ID because no single caller owns the upstream request. In-flight
-shared calls attribute the physical fetch to its initiator and record joiners
-as cache reuse. No wallet addresses, raw keys, full URLs, or provider error
-messages are included. Request IDs are logged only when UUID-shaped.
-
-`provider_request` structured logs are emitted immediately. Minute totals flush
-to PostgreSQL `provider_usage_minute` every ten seconds and at orderly shutdown.
-Cumulative snapshots use a process UUID and monotonic upserts, so retries and
-multiple containers do not double-count persisted totals. Old minute buffers
-are discarded after successful persistence. Retention removes up to 5,000 rows
-older than 30 days each hour per process. Up to 2,000 distinct metric buckets are
-buffered; `provider_metrics_overflow` and `provider_metrics_write_failed` expose
-loss or persistence failures. A crash can lose unflushed totals; immediate logs
-provide supporting evidence subject to Cloudflare log retention/sampling.
-
-Migration 8 creates the metrics table when the gateway starts. This patch must
-be deployed before counters appear in the hosted database; no historical
-request count can be recovered from this new table. Metrics cover this gateway
-only. They count requests, not plan-specific credits or dollar costs.
-
-## Operator queries
-
-Use database operator access; these metrics are not exposed by a public API.
-All queries below are read-only and sum across instances.
+Minute totals flush to PostgreSQL `provider_usage_minute` every ten seconds and
+on orderly shutdown. Cumulative upserts keyed by process UUID avoid double
+counting on retries. Retention is 30 days. A crash can lose unflushed totals;
+database failures/overflow emit diagnostic logs. The gateway does not yet have
+automatic budget alerts, collector heartbeat alerts or per-key billing totals.
+Counters measure requests, not plan-specific credits or costs. Operator probes
+outside the gateway are not included and must be accounted for separately.
 
 ```sql
--- Actual upstream attempts, errors, forced refreshes and latency over 24 hours.
-SELECT operation, source, forced, status, outcome, sum(count) AS attempts,
-       round(sum(duration_ms)::numeric / NULLIF(sum(count), 0), 1) AS avg_ms
+SELECT date_trunc('hour', bucket) AS hour, source, operation, status, outcome,
+       sum(count) AS attempts
 FROM provider_usage_minute
-WHERE bucket >= now() - interval '24 hours' AND left(outcome, 9) = 'upstream_'
-GROUP BY operation, source, forced, status, outcome
-ORDER BY attempts DESC;
+WHERE bucket >= now() - interval '24 hours'
+  AND left(outcome, 9) = 'upstream_'
+GROUP BY 1, source, operation, status, outcome
+ORDER BY 1 DESC, attempts DESC;
 
--- Traffic over time.
-SELECT date_trunc('hour', bucket) AS hour, source, sum(count) AS attempts
+-- Must remain empty after the no-polling deployment.
+SELECT source, operation, sum(count) AS attempts
 FROM provider_usage_minute
-WHERE bucket >= now() - interval '24 hours' AND left(outcome, 9) = 'upstream_'
-GROUP BY 1, source ORDER BY 1 DESC, attempts DESC;
+WHERE bucket >= :deployment_time
+  AND source IN ('background_monitor', 'realtime_poll')
+  AND left(outcome, 9) = 'upstream_'
+GROUP BY source, operation;
 
--- Callers responsible for upstream work, separating shared/background traffic.
-SELECT NULLIF(client_id, '') AS client_id, source, operation, sum(count) AS attempts
+-- A refusal exposes attempted policy regressions without spending a provider call.
+SELECT source, operation, sum(count) AS blocked
 FROM provider_usage_minute
-WHERE bucket >= now() - interval '24 hours' AND left(outcome, 9) = 'upstream_'
-GROUP BY client_id, source, operation ORDER BY attempts DESC LIMIT 50;
-
--- Cache reuse is separate from physical upstream attempts.
-SELECT operation, outcome, sum(count) AS occurrences
-FROM provider_usage_minute
-WHERE bucket >= now() - interval '24 hours' AND left(outcome, 6) = 'cache_'
-GROUP BY operation, outcome ORDER BY operation, occurrences DESC;
+WHERE bucket >= now() - interval '24 hours' AND outcome = 'policy_blocked'
+GROUP BY source, operation;
 ```
 
-After rollout, check logs for `provider_request` and metrics-write errors, run
-the queries after a full minute, and compare background transaction attempts
-with the unique enabled EVM address count. Five addresses at four ticks/minute
-implies roughly twenty background attempts/minute before scheduler/provider
-latency, failures, or watch changes. Investigate substantial excess, sustained
-429s, unexpected HTTP caller concentration, or provider totals materially above
-the gateway's measured attempts. Persisted metrics survive container restarts.
-
-Validation uses fake provider responses plus a dedicated local PostgreSQL
-database. No test spends Zerion credits or changes live watch registrations.
+Compare the same UTC window and key in Zerion's dashboard with these counters.
+Wallet-open requests can use multiple provider endpoints; one opening does not
+necessarily equal one billable request. HTTP clients can still send repeated
+requests, so request attribution and a separate usage-budget policy remain relevant.
