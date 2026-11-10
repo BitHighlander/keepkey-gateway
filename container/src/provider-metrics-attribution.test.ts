@@ -6,7 +6,7 @@ import { ProviderMetrics, type ProviderUsage } from "./provider-metrics";
 import { ZerionClient } from "./zerion";
 
 test('provider budget status is authenticated and never fetches paid data',async()=>{
- const app=createApp({config:{} as AppConfig,database:{authenticate:async key=>key==='valid'?{id:'fixture',username:'fixture'}:null,getProviderUsage:async()=>({provider:'zerion',state:'warning',windows:[{kind:'day',used:800,limit:1000}]})} as any});
+ const app=createApp({config:{} as AppConfig,database:{authenticate:async(key:string)=>key==='valid'?{id:'fixture',username:'fixture'}:null,getProviderUsage:async()=>({provider:'zerion',state:'warning',windows:[{kind:'day',used:800,limit:1000}]})} as any});
  expect((await app.fetch(new Request('http://fixture/api/v1/provider/usage'))).status).toBe(401);
  const response=await app.fetch(new Request('http://fixture/api/v1/provider/usage',{headers:{Authorization:'valid'}}));
  expect(response.status).toBe(200);expect((await response.json() as any).state).toBe('warning');
