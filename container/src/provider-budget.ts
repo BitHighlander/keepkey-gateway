@@ -1,6 +1,6 @@
 import type { SQL } from 'bun';
 export interface ProviderBudgetLimits { minute: number; day: number; month: number }
-export const DEFAULT_ZERION_LIMITS: ProviderBudgetLimits = { minute: 30, day: 1000, month: 25000 };
+export const DEFAULT_ZERION_LIMITS: ProviderBudgetLimits = { minute: 120, day: 10000, month: 250000 };
 export class ProviderBudgetError extends Error {
  readonly status = 429;
  constructor(readonly window: string) { super(`Zerion request budget exhausted (${window}); cached data remains available`); }
