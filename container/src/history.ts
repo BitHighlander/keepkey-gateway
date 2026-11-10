@@ -1,3 +1,4 @@
+import {providerContext} from './provider-metrics';
 import type { UtxoClient } from "./utxo";
 import type { ZerionClient } from "./zerion";
 import type { ChainHistoryClient } from "./chain-history";
@@ -14,6 +15,8 @@ export interface HistoryQuery {
 
 export interface HistoryRequest {
 	queries: HistoryQuery[];
+ providerRefreshPolicy?: "cache-only"|"on-demand";
+ refreshReason?: string;
 	page?: number;
 }
 
@@ -51,7 +54,7 @@ export class HistoryClient {
 		const histories = await Promise.all(queries.map(async (query) => {
 			try {
 				const transactions = await this.queryTransactions(query, page, evmTransactions, options);
-				return { caip: query.caip, pubkey: query.pubkey, transactions, fetchedAt, fetchedAtISO, page, cached: false, fresh: true, loading: false };
+				return { caip: query.caip, pubkey: query.pubkey, transactions, fetchedAt: providerContext.getStore()?.cacheOnly ? 0 : fetchedAt, fetchedAtISO: providerContext.getStore()?.cacheOnly ? new Date(0).toISOString() : fetchedAtISO, page, cached: providerContext.getStore()?.cacheOnly===true, fresh: providerContext.getStore()?.cacheOnly!==true, loading: false };
 			} catch (error) {
 				return { caip: query.caip, pubkey: query.pubkey, failure: error, fetchedAt, fetchedAtISO, page, cached: false, fresh: false, loading: false };
 			}
