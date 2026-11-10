@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import type { HistoryClient } from "./history";
 import type { DurableEventInput, DurableRealtimeStore, DurableWatch } from "./realtime-store";
 import { RealtimeError, validateAddresses } from "./realtime";
-import { watchKey } from "./realtime-watch";
+import { watchKey, canPollHistory } from "./realtime-watch";
 import chains from "../data/chains.json";
 const nativeCaip = new Map(Object.entries(chains as Record<string, any>).map(([id, chain]) => [id, String(chain.nativeAssetCaip || "")]));
 /** The Worker alarm calls tick even with Vault closed. Registrations, dedupe and
@@ -22,7 +22,9 @@ export class RealtimeMonitor {
    ...(body.since !== undefined ? { since: body.since as number } : {}), ...(body.revision !== undefined ? { revision: body.revision as number } : {}) });
   // The edge arms the durable alarm immediately after this successful response.
   return { success: true, walletScope, enabled: body.enabled, watching: addresses.length, unsupported,
-   backgroundMonitoring: body.enabled, retentionSeconds: 7 * 24 * 60 * 60, replayRequiresAcknowledgement: true,
+   backgroundMonitoring: body.enabled && addresses.some(w => canPollHistory(w.networkId)),
+   onDemandNetworks: [...new Set(addresses.filter(w => !canPollHistory(w.networkId)).map(w => w.networkId))],
+   retentionSeconds: 7 * 24 * 60 * 60, replayRequiresAcknowledgement: true,
    historyCoverage: "latest-provider-page", historyPageLimit: 50 };
  }
  tick(): Promise<{ watches: number; queued: number; failures: number }> {
@@ -30,21 +32,12 @@ export class RealtimeMonitor {
   this.running = this.run().finally(() => { this.running = undefined; }); return this.running;
  }
  private async run(): Promise<{ watches: number; queued: number; failures: number }> {
-  const rows = await this.store.listActiveWatches();
+  // Keep registrations/replay intact, but never turn EVM watches into paid reads.
+  // Returning zero polling watches also lets the scheduler disarm EVM-only alarms.
+  const rows = (await this.store.listActiveWatches()).filter(w => canPollHistory(w.networkId));
   const grouped = new Map<string, DurableWatch[]>();
   for (const row of rows) { const key = watchKey(row), group = grouped.get(key) || []; group.push(row); grouped.set(key, group); }
-  const records = [...grouped.values()];
-  const evmBatches = new Map<string, DurableWatch[][]>(), batches: DurableWatch[][][] = [];
-  for (const owners of records) {
-   const watch = owners[0];
-   if (watch.networkId.startsWith("eip155:")) {
-    const key = watch.address.toLowerCase(), batch = evmBatches.get(key) || [];
-    batch.push(owners); evmBatches.set(key, batch);
-   } else batches.push([owners]);
-  }
-  for (const batch of evmBatches.values()) {
-   for (let offset = 0; offset < batch.length; offset += 100) batches.push(batch.slice(offset, offset + 100));
-  }
+  const batches = [...grouped.values()].map(owners => [owners]);
   const incoming: DurableEventInput[] = []; let failures = 0, queued = 0, next = 0, possiblyTruncated = 0, unknownConfirmedTimestamps = 0;
   // Bound upstream concurrency while letting a slow chain yield to other work.
   await Promise.all(Array.from({ length: Math.min(6, batches.length) }, async () => {

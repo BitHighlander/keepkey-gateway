@@ -1,8 +1,25 @@
 import { describe, expect, test } from "bun:test";
 import { RealtimeHub, RealtimeError } from "./realtime";
+import { HistoryClient } from "./history";
+import { ZerionClient } from "./zerion";
 
-const NETWORK = "eip155:1";
+const NETWORK = "bip122:12a765e31ffd4059bada1e25190f6e98";
 const ADDRESS = "0x1111111111111111111111111111111111111111";
+
+test("EVM SSE/socket subscriptions and upstream hints never poll Zerion", async () => {
+ let fetches=0;
+ const zerion=new ZerionClient({apiKey:'fixture',fetch:(async(_input:string|URL|Request)=>{fetches++;return Response.json({data:[]})}) as typeof fetch});
+ const hub=new RealtimeHub(new HistoryClient({zerion}),5);
+ const watch={address:ADDRESS,networkId:'eip155:1'};
+ const response=hub.createSse('owner',[watch],undefined,{since:Date.now()-1000});
+ hub.addSocket('owner','socket',()=>{});
+ hub.subscribeSocket('owner','socket',[watch],undefined);
+ hub.upstreamChange(watch,'fixture-tx');hub.upstreamSync(watch.networkId,'new_block');
+ await Bun.sleep(40);
+ expect(fetches).toBe(0);
+ hub.close();
+ await response.body!.cancel();
+});
 
 describe("connection-scoped realtime", () => {
 	test("performs zero history work without a subscriber and stops after cancellation", async () => {
@@ -27,14 +44,14 @@ describe("connection-scoped realtime", () => {
 
 	test("deduplicates the same watch across subscribers", async () => {
 		const hub = new RealtimeHub({ getTransactionHistory: async () => ({ histories: [{ transactions: [] }] }) } as any, 60_000);
-		const one = hub.createSse("one", [{ address: ADDRESS, networkId: NETWORK }], undefined);
-		const two = hub.createSse("two", [{ address: ADDRESS.toUpperCase(), networkId: NETWORK }], undefined);
+		const one = hub.createSse("one", [{ address: ADDRESS, networkId: "eip155:1" }], undefined);
+		const two = hub.createSse("two", [{ address: ADDRESS.toUpperCase(), networkId: "eip155:1" }], undefined);
 		expect(hub.activeAddressCount()).toBe(1);
 		await one.body!.cancel();
 		await two.body!.cancel();
 	});
 
-	test("batches watches and keeps active fallback on a bounded cadence", async () => {
+	test("keeps non-Zerion fallback polling on a bounded cadence", async () => {
 		let calls = 0;
 		let largestBatch = 0;
 		const hub = new RealtimeHub({ getTransactionHistory: async (body: any) => {
@@ -49,9 +66,9 @@ describe("connection-scoped realtime", () => {
 		const reader = response.body!.getReader();
 		await reader.read();
 		await Bun.sleep(75);
-		expect(largestBatch).toBe(2);
-		expect(calls).toBeGreaterThanOrEqual(5);
-		expect(calls).toBeLessThanOrEqual(9);
+		expect(largestBatch).toBe(1);
+		expect(calls).toBeGreaterThanOrEqual(10);
+		expect(calls).toBeLessThanOrEqual(20);
 		await reader.cancel();
 	});
 

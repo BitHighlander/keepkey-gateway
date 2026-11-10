@@ -1,4 +1,4 @@
-import type { ProviderMetrics, ZerionOperation } from "./provider-metrics";
+import { providerContext, type ProviderMetrics, type ZerionOperation } from "./provider-metrics";
 import type { PersistentCache } from "./cache";
 import chainData from "../data/chains.json";
 
@@ -508,6 +508,11 @@ export class ZerionClient {
 	}
 
 	private async request(url: string, operation: ZerionOperation, forced = false): Promise<unknown> {
+		const source = providerContext.getStore()?.source;
+		if (source === "background_monitor" || source === "realtime_poll") {
+			this.metrics?.record(operation, "policy_blocked", { forced });
+			throw new ZerionError("Zerion reads require an on-demand request", 409);
+		}
 		const startedAt = performance.now();
 		let status = 0, outcome = "upstream_network_error";
 		try {

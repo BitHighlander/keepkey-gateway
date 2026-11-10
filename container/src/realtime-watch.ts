@@ -3,3 +3,7 @@ export interface WatchAddress { address: string; networkId: string }
 export function watchKey(watch: WatchAddress): string {
  return `${watch.networkId}:${watch.networkId.startsWith("eip155:") ? watch.address.toLowerCase() : watch.address}`;
 }
+/** EVM history is supplied by paid Zerion reads, which are on demand only. */
+export function canPollHistory(networkId: string): boolean {
+ return !networkId.startsWith("eip155:");
+}
