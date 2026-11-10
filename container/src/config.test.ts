@@ -8,7 +8,7 @@ describe("loadConfig", () => {
 			databaseUrl: "postgres://pioneer:pioneer@localhost/pioneer",
 			databaseMaxConnections: 5,
 			zerionApiKey: undefined,
-            zerionLimits: { minute:30, day:1000, month:25000 },
+            zerionLimits: { minute:120, day:10000, month:250000 },
 			nownodesApiKey: undefined,
 			coingeckoApiKey: undefined,
 			swapkitApiKey: undefined,
