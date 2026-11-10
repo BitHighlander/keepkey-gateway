@@ -1,3 +1,4 @@
+import { providerContext } from './provider-metrics';
 import chainData from "../data/chains.json";
 import { formatUnits, type EvmClient } from "./evm";
 import type { MarketClient } from "./market";
@@ -27,6 +28,8 @@ interface ExtraContract {
 export interface PortfolioRequest {
 	pubkeys: PortfolioPubkey[];
 	includeDefi?: boolean;
+ providerRefreshPolicy?: "cache-only" | "on-demand";
+ refreshReason?: string;
 	extraContracts?: ExtraContract[];
 }
 
@@ -252,6 +255,7 @@ export class PortfolioClient {
 			}
 		}));
 
+		const cacheOnly=providerContext.getStore()?.cacheOnly===true;
 		const positionsByAddress = new Map<string, ZerionWalletPosition[]>();
 		const evmAddresses = [...new Set(evmEntries.map((entry) => entry.pubkey.toLowerCase()))];
 		if (this.dependencies.zerion) {
@@ -259,6 +263,7 @@ export class PortfolioClient {
 				try {
 					positionsByAddress.set(address, await this.dependencies.zerion!.getWalletPositions(address, options));
 				} catch {
+                    for(const entry of evmEntries.filter(row=>row.pubkey.toLowerCase()===address)) failures.push({caip:entry.caip,reason:"Token discovery unavailable; last known balances must be retained"});
 					// A direct native RPC fallback below preserves verified balances on
 					// supported networks without pretending token discovery succeeded.
 				}
@@ -270,6 +275,7 @@ export class PortfolioClient {
 			const address = entry.pubkey.toLowerCase();
 			const positions = positionsByAddress.get(address);
 			if (positions) {
+                if(!cacheOnly) {
 				const native = positions.find((position) => position.networkId === entry.networkId && position.type === "native");
 				const nativeBalance = this.makeBalance({
 					...metadata,
@@ -285,6 +291,7 @@ export class PortfolioClient {
 					fetchedAtISO,
 				});
 				balances.set(balanceKey(nativeBalance), nativeBalance);
+                }
 
 				for (const token of positions.filter((position) => position.networkId === entry.networkId && position.type === "token")) {
 					const tokenBalance = this.makeBalance({
@@ -305,9 +312,10 @@ export class PortfolioClient {
 						fetchedAt,
 						fetchedAtISO,
 					});
-					balances.set(balanceKey(tokenBalance), tokenBalance);
+					if(cacheOnly) { tokenBalance.isStale=true; tokenBalance.degraded=true; tokenBalance.verified=false; tokenBalance.dataSource='zerion-cache'; tokenBalance.fetchedAt=0; }
+                    balances.set(balanceKey(tokenBalance), tokenBalance);
 				}
-				return;
+                if(!cacheOnly)return;
 			}
 
 			if (!this.dependencies.evm) {
@@ -389,14 +397,15 @@ export class PortfolioClient {
 			defiPositions = [];
 			if (this.dependencies.zerion) {
 				const results = await Promise.allSettled(evmAddresses.map((address) => this.dependencies.zerion!.getDefiPositions(address)));
-				const seen = new Set<string>();
+				if(results.every(result=>result.status==='rejected'))defiPositions=undefined;
+                const seen = new Set<string>();
 				for (const result of results) {
 					if (result.status === "rejected") continue;
 					for (const position of result.value) {
 						const key = `${position.pubkey}|${position.protocol}|${position.networkId}|${position.groupId || position.label}`.toLowerCase();
 						if (!seen.has(key)) {
 							seen.add(key);
-							defiPositions.push(position);
+							defiPositions!.push(position);
 						}
 					}
 				}
@@ -413,10 +422,10 @@ export class PortfolioClient {
 				degraded: failures.length > 0,
 				degradedCount: failures.length,
 				failures,
-				staleChains: [],
+				staleChains: cacheOnly ? [...new Set(evmEntries.map(entry=>entry.networkId))] : [],
 			},
 		};
-		if (body.includeDefi) response.defiPositions = defiPositions;
+		if (body.includeDefi && defiPositions!==undefined) response.defiPositions = defiPositions;
 		return response;
 	}
 

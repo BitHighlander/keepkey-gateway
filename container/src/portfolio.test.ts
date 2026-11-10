@@ -5,6 +5,7 @@ import { createApp } from "./http";
 import type { Database } from "./database";
 import type { AppConfig } from "./config";
 import type { PersistentCache } from "./cache";
+import {ZerionClient} from './zerion';
 
 const BTC_CAIP = "bip122:000000000019d6689c085ae165831e93/slip44:0";
 const LTC_CAIP = "bip122:12a765e31ffd4059bada1e25190f6e98/slip44:2";
@@ -13,6 +14,24 @@ const BASE_CAIP = "eip155:8453/slip44:60";
 const HIVE_CAIP = "hive:beeab0de/slip44:1275";
 const ADDRESS = "0x42b9df65b219b3dd36ff330a4dd8f327a6ada990";
 const USDC = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48";
+
+test('automatic HTTP refreshes use cached discovery and fresh native RPC without paid requests',async()=>{
+ let paid=0,rpc=0;
+ const zerion=new ZerionClient({apiKey:'fixture',fetch:(async(input:string|URL|Request)=>{
+  paid++;return Response.json(String(input).endsWith('/chains/')?{data:[{id:'ethereum',attributes:{external_id:'0x1'}}]}:{data:[]});
+ }) as typeof fetch});
+ const portfolio=new PortfolioClient({zerion,evm:{getBalance:async()=>{rpc++;return {balance:'2',balanceHex:'0x0'} as any;},getTokenBalance:async()=>({balance:'0'} as any)}});
+ const app=createApp({config:{} as AppConfig,database:{authenticate:async()=>({id:'fixture',username:'fixture'})} as any,portfolio});
+ const read=(policy:string)=>app.fetch(new Request('http://fixture/api/v1/portfolio/balances?forceRefresh=true',{method:'POST',headers:{Authorization:'fixture','Content-Type':'application/json'},body:JSON.stringify({pubkeys:[{caip:ETH_CAIP,pubkey:ADDRESS}],providerRefreshPolicy:policy,refreshReason:policy==='on-demand'?'wallet-open':'swap-reconcile'})}));
+ expect((await read('on-demand')).status).toBe(200);expect(paid).toBe(2);
+ for(let i=0;i<3;i++){
+  const response:any=await(await read('cache-only')).json();
+  expect(response.balances[0].balance).toBe('2');expect(response.balances[0].dataSource).toBe('nownodes');
+  expect(response.meta.staleChains).toContain('eip155:1');
+ }
+ expect(paid).toBe(2);expect(rpc).toBe(3);
+ expect((await read('unknown')).status).toBe(400);expect(paid).toBe(2);
+});
 
 describe("PortfolioClient", () => {
 	test("manual HTTP refresh bypasses cached zero balances and refuses stale fallback on provider failure", async () => {

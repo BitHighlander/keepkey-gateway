@@ -283,7 +283,11 @@ export function createApp({ config, database, zerion, evm, market, utxo, portfol
 					return json(swap, 200, requestId, { "Cache-Control": "no-store" });
 				}
 
-				if (request.method === "POST" && url.pathname === "/api/v1/market/info") {
+				if (request.method === "GET" && url.pathname === "/api/v1/provider/usage") {
+                    await authenticated();
+                    return json(await database.getProviderUsage(),200,requestId,{"Cache-Control":"no-store"});
+                }
+                if (request.method === "POST" && url.pathname === "/api/v1/market/info") {
 					if (!market) throw new HttpError(503, "feature_unavailable", "Market pricing is not configured");
 					await authenticated();
 					return json(await market.getPrices(await bodyStringArray(request)), 200, requestId);
@@ -314,6 +318,12 @@ export function createApp({ config, database, zerion, evm, market, utxo, portfol
 					if (!portfolio) throw new HttpError(503, "feature_unavailable", "Portfolio aggregation is not configured");
 					const client = await authenticated();
 					const body = await bodyObject(request) as unknown as PortfolioRequest;
+                    const policy=(body as any).providerRefreshPolicy;
+                    if(policy!==undefined && policy!=="cache-only" && policy!=="on-demand") throw new HttpError(400,"invalid_refresh_policy","Invalid provider refresh policy");
+                    providerContext.getStore()!.cacheOnly=policy==="cache-only";
+                    const reason=(body as any).refreshReason;
+                    providerContext.getStore()!.refreshReason=['wallet-open','manual','automatic','focus','swap-reconcile','degraded-retry'].includes(reason)?reason:reason===undefined?'legacy':'unknown';
+                    if(!['wallet-open','manual','legacy'].includes(providerContext.getStore()!.refreshReason!))providerContext.getStore()!.cacheOnly=true;
 					const balances = await portfolio.getBalances(body, { forceRefresh: queryBoolean(url, "forceRefresh") });
 					realtime?.rememberPortfolio(client.id, body.pubkeys);
 					return json(balances, 200, requestId, { "Cache-Control": "no-store" });

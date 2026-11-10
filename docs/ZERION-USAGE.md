@@ -36,8 +36,19 @@ wallet addresses, provider URLs and response bodies.
 Minute totals flush to PostgreSQL `provider_usage_minute` every ten seconds and
 on orderly shutdown. Cumulative upserts keyed by process UUID avoid double
 counting on retries. Retention is 30 days. A crash can lose unflushed totals;
-database failures/overflow emit diagnostic logs. The gateway does not yet have
-automatic budget alerts, collector heartbeat alerts or per-key billing totals.
+database failures/overflow emit diagnostic logs. The gateway now records credential fingerprints and zero-count collector heartbeats.
+Shared PostgreSQL reservations cap all Zerion credentials/instances at 30 physical
+requests per minute, 1,000 per UTC day and 25,000 per UTC calendar month by default.
+These conservative request caps protect the remaining allowance; they do not
+claim to represent the provider's billing units. A key rotation does not reset
+these counters. Existing measured attempts seed each ledger window once.
+Reservations fail closed when the database is unavailable. Cache-only automatic
+refreshes do not reserve credits or fetch Zerion. The limits are configurable
+with ZERION_REQUESTS_PER_MINUTE, ZERION_REQUESTS_PER_DAY and
+ZERION_REQUESTS_PER_MONTH. Durable alerts at 50/80/100 percent are deduplicated in
+provider_budget_alerts and emitted to structured logs. Authenticated Desktop
+clients can read /api/v1/provider/usage to display warning/limited status without
+making a paid provider call. Provider-dashboard reconciliation remains separate.
 Counters measure requests, not plan-specific credits or costs. Operator probes
 outside the gateway are not included and must be accounted for separately.
 

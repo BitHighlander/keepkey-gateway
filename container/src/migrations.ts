@@ -214,4 +214,17 @@ export const migrations: readonly Migration[] = [
 			)`,
 		],
 	},
+ {
+  version: 9, name: "provider_spend_controls", statements: [
+   `ALTER TABLE provider_usage_minute ADD COLUMN IF NOT EXISTS credential_id text NOT NULL DEFAULT ''`,
+   `ALTER TABLE provider_usage_minute ADD COLUMN IF NOT EXISTS refresh_reason text NOT NULL DEFAULT ''`,
+   `CREATE TABLE IF NOT EXISTS provider_request_budgets (
+     provider text NOT NULL, window_kind text NOT NULL, window_start timestamptz NOT NULL,
+     used bigint NOT NULL CHECK (used >= 0), PRIMARY KEY(provider,window_kind,window_start))`,
+   `CREATE TABLE IF NOT EXISTS provider_budget_alerts (
+     provider text NOT NULL, window_kind text NOT NULL, window_start timestamptz NOT NULL,
+     threshold integer NOT NULL, used bigint NOT NULL, request_limit bigint NOT NULL,
+     created_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(provider,window_kind,window_start,threshold))`
+  ]
+ },
 ];
