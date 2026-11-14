@@ -5,11 +5,13 @@ import { MemoryRateLimiter, requestRateLimits } from "./rate-limit";
 import { publicOpenApiResponse } from "./public-openapi";
 import { armPaymentMonitor, runPaymentMonitor, changesDurablePaymentWatches, isInternalRealtimePath, type BackgroundTickResult } from "./realtime-scheduler";
 import { ContainerStartError, prodInstanceId, prodPolicy, serveProd, type PoolEnv } from "./pool";
+import { isTakeoverHost, serveTakeover } from "./takeover";
 
 interface Env extends ContainerRuntimeEnv, PoolEnv {
 	PIONEER_CONTAINER: DurableObjectNamespace<PioneerContainer>;
 	PROD_CONTAINER: DurableObjectNamespace<ProdGatewayContainer>;
 	REALTIME_WATCHDOG: DurableObjectNamespace<RealtimeWatchdog>;
+	COINS: R2Bucket;
 }
 
 // Blue/test hosts: one instance that scales to zero.
@@ -102,7 +104,9 @@ export default {
 				status = 404;
 				return new Response("Not found", { status: 404 });
 			}
-			for (const limit of requestRateLimits(request)) {
+			// Logos: a wallet loads hundreds at startup and green never limited them.
+			const takeoverCoin = isTakeoverHost(request.url) && new URL(request.url).pathname.startsWith("/coins/");
+			for (const limit of takeoverCoin ? [] : requestRateLimits(request)) {
 				const result = rateLimiter.take(limit.scope, limit.policy);
 				if (!result.allowed) {
 					status = 429;
@@ -114,7 +118,13 @@ export default {
 			}
 
 			const policy = prodPolicy(env);
-			const upstream = policy.hosts.has(new URL(request.url).hostname.toLowerCase())
+			const upstream = isTakeoverHost(request.url)
+				? await serveTakeover(request, {
+					coin: (name) => env.COINS.get(`coins/${name}`),
+					gateway: async (forwarded) => (await readyContainer(env, env.PIONEER_CONTAINER, MAIN_INSTANCE_ID)).fetch(forwarded),
+					legacy: (forwarded) => fetch(forwarded),
+				})
+				: policy.hosts.has(new URL(request.url).hostname.toLowerCase())
 				? await serveProd(request, policy, {
 					instance: async (index, forwarded) => {
 						let container;
