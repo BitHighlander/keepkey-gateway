@@ -8,7 +8,8 @@
   "workers_dev": true,
   "routes": [
     { "pattern": "oracles.cc/*", "zone_name": "oracles.cc" },
-    { "pattern": "api-blue.keepkey.info/*", "zone_name": "keepkey.info" }
+    { "pattern": "api-blue.keepkey.info/*", "zone_name": "keepkey.info" },
+    { "pattern": "api.keepkey.info/*", "zone_name": "keepkey.info" }
   ],
   "vars": {
     "PORT": "12000",
