@@ -8,8 +8,7 @@
   "workers_dev": true,
   "routes": [
     { "pattern": "oracles.cc/*", "zone_name": "oracles.cc" },
-    { "pattern": "api-blue.keepkey.info/*", "zone_name": "keepkey.info" },
-    { "pattern": "api.keepkey.info/*", "zone_name": "keepkey.info" }
+    { "pattern": "api-blue.keepkey.info/*", "zone_name": "keepkey.info" }
   ],
   "vars": {
     "PORT": "12000",
@@ -30,7 +29,6 @@
     // ponytail: static guess, tune from a load test.
     "GATEWAY_MAX_INFLIGHT": "200"
   },
-  "r2_buckets": [{ "binding": "COINS", "bucket_name": "keepkey-coins" }],
   "triggers": { "crons": ["* * * * *"] },
   "secrets": {
     "required": [
