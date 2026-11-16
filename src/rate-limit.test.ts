@@ -37,6 +37,13 @@ describe("Worker memory rate limiter", () => {
 		expect(allowed.every(Boolean)).toBe(true);
 	});
 
+	test("bounds sponsored Hive creation independently of wallet reads", () => {
+		const limits = requestRateLimits(new Request("https://gateway/api/v1/hive/create-account", { method: "POST", headers: { Authorization: "fixture", "cf-connecting-ip": "192.0.2.4" } }));
+		expect(limits.map(limit => limit.scope)).toEqual(["hive-create:ip:192.0.2.4", "hive-create:key:fixture"]);
+		const limiter = new MemoryRateLimiter();
+		expect(Array.from({ length: 4 }, () => limiter.take(limits[0].scope, limits[0].policy, 0).allowed)).toEqual([true, true, true, false]);
+	});
+
 	test("evicts within its configured memory bound", () => {
 		const limiter = new MemoryRateLimiter(1);
 		const policy = { capacity: 1, refillPerSecond: 1 };

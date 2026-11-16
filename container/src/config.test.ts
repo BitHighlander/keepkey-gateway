@@ -14,6 +14,8 @@ describe("loadConfig", () => {
 			swapkitApiKey: undefined,
 			zeroxApiKey: undefined,
 			hiveOnboardingEnabled: false,
+			hiveAllowCashFee: false,
+			hiveMaxCreationFeeMilliHive: 3000,
 			hiveSponsorAccount: undefined,
 			hiveSponsorActiveWif: undefined,
 		});
@@ -37,6 +39,11 @@ describe("loadConfig", () => {
 
 	test("fails fast without PostgreSQL", () => {
 		expect(() => loadConfig({})).toThrow("DATABASE_URL is required");
+	});
+	test("requires an explicit cash-fee switch and bounds the maximum account fee", () => {
+		const base = { DATABASE_URL: "postgres://test:test@localhost/test" };
+		expect(loadConfig({ ...base, HIVE_ONBOARDING_ENABLED: "true", HIVE_ALLOW_CASH_FEE: "true", HIVE_MAX_CREATION_FEE_MILLIHIVE: "4000" })).toMatchObject({ hiveOnboardingEnabled: true, hiveAllowCashFee: true, hiveMaxCreationFeeMilliHive: 4000 });
+		for (const value of ["0", "-1", "3.5", "invalid", "100001"]) expect(() => loadConfig({ ...base, HIVE_MAX_CREATION_FEE_MILLIHIVE: value })).toThrow("HIVE_MAX_CREATION_FEE_MILLIHIVE");
 	});
 	test('forwards legacy fee configuration and accepts explicitly disabled fees',()=>{
 		const config=loadConfig({DATABASE_URL:'postgres://pioneer:pioneer@localhost/pioneer',NEAR_AFFILIATE_BPS:'0',NEAR_API_SECRET:'fixture',RELAY_AFFILIATE_BPS:'31',THORCHAIN_AFFILIATE:'keep',THORCHAIN_AFFILIATE_BPS:'40'});

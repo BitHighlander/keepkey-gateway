@@ -3,6 +3,10 @@ import { describe, expect, test } from "bun:test";
 import { openApiDocument } from "./openapi";
 
 describe("OpenAPI Vault contract", () => {
+	test("exposes the legacy Hive sponsor inspection operation", () => {
+		const document = openApiDocument("https://gateway.test/spec/swagger.json") as any;
+		expect(document.paths["/hive/sponsor-info"].get.operationId).toBe("GetHiveSponsorInfo");
+	});
 	test("uses OpenAPI 3 requestBody semantics required by pioneer-client", () => {
 		const document = openApiDocument("http://127.0.0.1:12000/spec/swagger.json") as any;
 		expect(document.openapi).toBe("3.0.0");

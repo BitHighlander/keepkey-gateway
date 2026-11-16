@@ -59,6 +59,12 @@ describe("api.keepkey.info takeover", () => {
 		expect(r.status).toBe(500);
 		expect(seen.legacy).toEqual([]);
 	});
+	for (const status of [401, 404, 405, 503]) test(`Hive creation ${status} never falls back to the legacy claim ledger`, async () => {
+		const { d, seen } = deps(() => new Response("rejected", { status }));
+		const r = await serveTakeover(at("/api/v1/hive/create-account", { method: "POST", body: "{}" }), d);
+		expect(r.status).toBe(status);
+		expect(seen.legacy).toEqual([]);
+	});
 
 	test("POST body is replayed to green", async () => {
 		const { d, seen } = deps(() => new Response("no", { status: 404 }));

@@ -60,6 +60,7 @@ export class MemoryRateLimiter {
 
 const REGISTRATION: RateLimitPolicy = { capacity: 5, refillPerSecond: 5 / 60 };
 const EXPENSIVE: RateLimitPolicy = { capacity: 30, refillPerSecond: 30 / 60 };
+const HIVE_CREATION: RateLimitPolicy = { capacity: 3, refillPerSecond: 3 / 60 };
 // A wallet sync issues one history call per chain (Vault: ~30 at startup), and
 // history is served from a 15s demand cache, so it gets its own larger bucket.
 const HISTORY: RateLimitPolicy = { capacity: 120, refillPerSecond: 2 };
@@ -73,6 +74,9 @@ export function requestRateLimits(request: Request): Array<{ scope: string; poli
 	}
 
 	const credential = request.headers.get("authorization") || request.headers.get("x-api-key");
+	if (request.method === "POST" && url.pathname === "/api/v1/hive/create-account") {
+		return [{ scope: `hive-create:ip:${ip}`, policy: HIVE_CREATION }, ...(credential ? [{ scope: `hive-create:key:${credential}`, policy: HIVE_CREATION }] : [])];
+	}
 	const history = url.pathname === "/api/v1/tx/history";
 	const expensive = /\/(quote|portfolio|broadcast|telemetry)(\/|$)/.test(url.pathname);
 	const kind = history ? "history" : expensive ? "expensive" : "general";

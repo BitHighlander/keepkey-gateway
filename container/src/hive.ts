@@ -2,7 +2,7 @@ import type { PersistentCache } from "./cache";
 import { DemandCache } from "./demand-cache";
 import { createHash } from "node:crypto";
 import { getAddress, verifyMessage } from "ethers";
-import { PrivateKey, PublicKey, Signature, Transaction, config as hiveConfig } from "hive-tx";
+import { PrivateKey, PublicKey, Signature, Transaction, type Operation, type TransactionType } from "hive-tx";
 import type { Database } from "./database";
 import type { EvmClient } from "./evm";
 
@@ -10,7 +10,7 @@ const NODES = ["https://api.hive.blog", "https://api.deathwing.me", "https://hiv
 const CHAIN_ID = "beeab0de00000000000000000000000000000000000000000000000000000000";
 
 export class HiveError extends Error {
-	constructor(message: string, public readonly status = 502) { super(message); }
+	constructor(message: string, public readonly status = 502, public readonly retryAfter?: number) { super(message); }
 }
 
 export class HiveClient {
@@ -20,9 +20,40 @@ export class HiveClient {
 		enabled: boolean;
 		account?: string;
 		activeWif?: string;
-		database: Pick<Database, "reserveHiveClaim" | "completeHiveClaim" | "releaseHiveClaim" | "runExclusive">;
+		allowCashFee?: boolean;
+		maxCreationFeeMilliHive?: number;
+		database: Pick<Database, "getHiveClaim" | "markHiveClaimSubmitted" | "reserveHiveClaim" | "completeHiveClaim" | "releaseHiveClaim" | "runExclusive">;
 		evm?: Pick<EvmClient, "getBalance">;
 	}) { this.cache = new DemandCache(cache, 1_000); }
+
+	get onboardingStatus(): string {
+		return !this.sponsor?.enabled ? "disabled" : this.sponsor.account && this.sponsor.activeWif && this.sponsor.evm ? "enabled" : "unconfigured";
+	}
+
+	async sponsorInfo(): Promise<Record<string, unknown>> {
+		const sponsor = this.sponsor;
+		if (!sponsor?.account) throw new HiveError("Hive sponsor account is not configured", 503);
+		const [accounts, rcResult, props, chainProps] = await Promise.all([
+			this.rpc("condenser_api.get_accounts", [[sponsor.account]]),
+			this.rpc("rc_api.find_rc_accounts", { accounts: [sponsor.account] }),
+			this.rpc("condenser_api.get_dynamic_global_properties", []),
+			this.rpc("condenser_api.get_chain_properties", []),
+		]);
+		const account = accounts?.[0];
+		if (!account) throw new HiveError("Hive sponsor account was not found", 503);
+		const actPool = accountTokens(account);
+		const fee = hiveMilliUnits(chainProps?.account_creation_fee);
+		const balance = hiveMilliUnits(account.balance);
+		const cashAvailable = sponsor.allowCashFee && fee > 0 && fee <= (sponsor.maxCreationFeeMilliHive ?? 3000);
+		const rc = rcResult?.rc_accounts?.[0];
+		return {
+			success: true, account: sponsor.account, onboardingEnabled: this.onboardingStatus === "enabled",
+			actPool, rcPercent: Math.min(100, Math.max(0, Math.round(Number(rc?.rc_manabar?.current_mana ?? 0) / Number(rc?.max_rc || 1) * 100) || 0)),
+			hivePower: vestsToHp(account.vesting_shares, props),
+			creatable: this.onboardingStatus === "enabled" ? actPool + (cashAvailable ? Math.floor(balance / fee) : 0) : 0,
+			cashFeeEnabled: !!sponsor.allowCashFee, creationFee: chainProps.account_creation_fee,
+		};
+	}
 
 	async account(pubkey: string, options: { forceRefresh?: boolean } = {}): Promise<Record<string, unknown>> {
 		if (!/^STM[1-9A-HJ-NP-Za-km-z]{48,52}$/.test(pubkey)) return { success: false, error: "Invalid Hive public key (expected STM-prefixed base58)" };
@@ -138,39 +169,67 @@ export class HiveClient {
 		const ethBalance = await sponsor.evm.getBalance("eip155:1", canonicalEth);
 		if (!(Number(ethBalance.balance) > 0)) throw new HiveError("ETH address must hold mainnet ETH to claim a sponsored account", 403);
 
-		const existing = await this.rpc("condenser_api.get_accounts", [[username]]);
-		if (Array.isArray(existing) && existing.length > 0) throw new HiveError("Username already registered", 409);
 		const reservation = canonicalEth.toLowerCase();
-		if (!await sponsor.database.reserveHiveClaim(clientId, reservation, username)) throw new HiveError("This ETH address or client has already claimed a sponsored Hive account", 409);
-		try {
-			const txid = await sponsor.database.runExclusive("hive:sponsor-account-create", async () => {
-				// Re-check under the cross-container PostgreSQL lock. If the ACT pool is
-				// empty, mint exactly one with Resource Credits as part of this demand.
-				const sponsorAccounts = await this.rpc("condenser_api.get_accounts", [[sponsor.account]]);
-				const actPool = Number(sponsorAccounts?.[0]?.pending_claimed_accounts || 0);
-				if (!Number.isSafeInteger(actPool) || actPool < 0) throw new Error("Sponsor ACT pool is invalid");
-				hiveConfig.nodes = [...NODES];
-				const activeKey = PrivateKey.fromString(sponsor.activeWif!);
-				if (actPool === 0) {
-					const claim = new Transaction();
-					await claim.addOperation("claim_account", { creator: sponsor.account!, fee: "0.000 HIVE", extensions: [] });
-					claim.sign(activeKey);
-					await claim.broadcast(true);
+		return sponsor.database.runExclusive("hive:sponsor-account-create", async () => {
+			const prior = await sponsor.database.getHiveClaim(reservation);
+			if (prior && prior.username !== username) throw new HiveError("This ETH address already has a sponsored Hive account", 409);
+			const existing = (await this.rpc("condenser_api.get_accounts", [[username]]))?.[0];
+			if (prior) {
+				// A retry may follow a lost HTTP response or a failed database finalize.
+				// Reconcile the on-chain authorities before returning the recorded txid.
+				if (prior.txid && existing && matchesAccountKeys(existing, keys)) {
+					await sponsor.database.completeHiveClaim(reservation, prior.txid).catch(() => {});
+					return { success: true, username, txid: prior.txid };
 				}
-				const transaction = new Transaction();
+				throw new HiveError("An earlier sponsored account request is pending confirmation", 503, 10);
+			}
+			if (existing) throw new HiveError("Username already registered", 409);
+			if (!await sponsor.database.reserveHiveClaim(clientId, reservation, username)) throw new HiveError("This ETH address or client has already claimed a sponsored Hive account", 409);
+			let submitted = false;
+			try {
+				const sponsorAccount = (await this.rpc("condenser_api.get_accounts", [[sponsor.account]]))?.[0];
+				if (!sponsorAccount) throw new HiveError("Hive sponsor account was not found", 503);
+				let activeKey: PrivateKey;
+				try { activeKey = PrivateKey.fromString(sponsor.activeWif!); }
+				catch { throw new HiveError("Hive sponsor active key is invalid", 503); }
+				if (!singleKeyControls(sponsorAccount.active, activeKey.createPublic().toString())) throw new HiveError("Hive sponsor active key does not match its on-chain authority", 503);
 				const authority = (key: string) => ({ weight_threshold: 1, account_auths: [] as [string, number][], key_auths: [[key, 1]] as [string, number][] });
-				await transaction.addOperation("create_claimed_account", { creator: sponsor.account!, new_account_name: username, owner: authority(keys.ownerKey), active: authority(keys.activeKey), posting: authority(keys.postingKey), memo_key: keys.memoKey, json_metadata: "", extensions: [] });
-				transaction.sign(activeKey);
-				const result = await transaction.broadcast(true);
-				return String((result as any)?.tx_id || (result as any)?.id || "");
-			});
-			if (!/^[a-fA-F0-9]{40}$/.test(txid)) throw new Error("Hive broadcast returned no transaction id");
-			await sponsor.database.completeHiveClaim(reservation, txid);
-			return { success: true, txid, username };
-		} catch (error) {
-			await sponsor.database.releaseHiveClaim(reservation).catch(() => {});
-			throw new HiveError(`Hive account creation failed: ${error instanceof Error ? error.message : String(error)}`);
-		}
+				const accountBody = { creator: sponsor.account!, new_account_name: username, owner: authority(keys.ownerKey), active: authority(keys.activeKey), posting: authority(keys.postingKey), memo_key: keys.memoKey, json_metadata: "" };
+				let operation: Operation;
+				if (accountTokens(sponsorAccount) > 0) {
+					operation = ["create_claimed_account", { ...accountBody, extensions: [] }];
+				} else {
+					if (!sponsor.allowCashFee) throw new HiveError("Sponsor account token pool is empty", 503, 60);
+					const props = await this.rpc("condenser_api.get_chain_properties", []);
+					const fee = hiveMilliUnits(props?.account_creation_fee);
+					if (fee <= 0 || fee > (sponsor.maxCreationFeeMilliHive ?? 3000)) throw new HiveError("Hive account creation fee exceeds the sponsor limit", 503, 60);
+					if (hiveMilliUnits(sponsorAccount.balance) < fee) throw new HiveError("Sponsor needs more liquid HIVE to create accounts", 503, 60);
+					operation = ["account_create", { ...accountBody, fee: props.account_creation_fee }];
+				}
+				const params = await this.txParams();
+				const transaction = new Transaction({ transaction: {
+					ref_block_num: Number(params.refBlockNum), ref_block_prefix: Number(params.refBlockPrefix),
+					expiration: String(params.expirationIso), operations: [operation], extensions: [], signatures: [],
+				} as TransactionType });
+				const signed = transaction.sign(activeKey);
+				const txid = transaction.digest().txId;
+				// Persist intent before broadcasting. Network failures after this point
+				// must retain the reservation: the chain may already have spent the fee.
+				await sponsor.database.markHiveClaimSubmitted(reservation, txid);
+				submitted = true;
+				const result = await this.rpc("condenser_api.broadcast_transaction_synchronous", [signed], 20_000);
+				if (result?.id !== txid) throw new HiveError("Hive account creation is pending confirmation", 503, 10);
+				await sponsor.database.completeHiveClaim(reservation, txid).catch(() => {
+					console.error(JSON.stringify({ event: "hive_claim_finalize_pending", txid }));
+				});
+				return { success: true, txid, username };
+			} catch (error) {
+				if (submitted) throw new HiveError("Hive account creation is pending confirmation; retry the same username", 503, 10);
+				await sponsor.database.releaseHiveClaim(reservation).catch(() => {});
+				if (error instanceof HiveError) throw error;
+				throw new HiveError("Hive account creation could not be prepared", 503, 30);
+			}
+		});
 	}
 
 	private async rpc(method: string, params: unknown, timeout = 10_000): Promise<any> {
@@ -188,6 +247,23 @@ export class HiveClient {
 }
 
 function amount(raw: unknown): string { return String(raw || "0.000").split(" ")[0]; }
+function hiveMilliUnits(raw: unknown): number {
+	if (typeof raw !== "string" || !/^\d+\.\d{3} HIVE$/.test(raw)) throw new HiveError("Invalid HIVE fee or balance from chain", 503);
+	const value = Number(raw.slice(0, -5).replace(".", ""));
+	if (!Number.isSafeInteger(value)) throw new HiveError("HIVE fee or balance is out of range", 503);
+	return value;
+}
+function accountTokens(account: any): number {
+	const value = Number(account.pending_claimed_accounts);
+	if (!Number.isSafeInteger(value) || value < 0) throw new HiveError("Sponsor account token pool is invalid", 503);
+	return value;
+}
+function singleKeyControls(authority: any, key: string): boolean {
+	return Number(authority?.weight_threshold) > 0 && Array.isArray(authority?.key_auths) && authority.key_auths.some((entry: any) => Array.isArray(entry) && entry[0] === key && Number(entry[1]) >= Number(authority.weight_threshold));
+}
+function matchesAccountKeys(account: any, keys: { ownerKey: string; activeKey: string; postingKey: string; memoKey: string }): boolean {
+	return singleKeyControls(account.owner, keys.ownerKey) && singleKeyControls(account.active, keys.activeKey) && singleKeyControls(account.posting, keys.postingKey) && account.memo_key === keys.memoKey;
+}
 function number(raw: unknown, field: string): number { const value = Number(raw); if (!Number.isSafeInteger(value) || value < 0 || value > 0xffffffff) throw new HiveError(`Invalid ${field}`, 400); return value; }
 function iso(raw: unknown): string { const value = String(raw || ""); if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z?$/.test(value) || !Number.isFinite(Date.parse(value.endsWith("Z") ? value : `${value}Z`))) throw new HiveError("Invalid expiration", 400); return value; }
 function vestsToHp(raw: unknown, props: any): string {
@@ -225,7 +301,8 @@ export function verifyHiveAttestation(input: HiveAttestationInput, sponsorAccoun
 		const digest = createHash("sha256").update(Buffer.concat([Buffer.from(CHAIN_ID, "hex"), tx])).digest();
 		if (Signature.from(input.signature).getPublicKey(new Uint8Array(digest)).toString() !== PublicKey.fromString(input.ownerKey).toString()) return { ok: false, code: 401, error: "signature does not recover to ownerKey" };
 		const reader = new TxReader(tx);
-		reader.u16(); reader.u32(); reader.u32(); reader.varint();
+		reader.u16(); reader.u32(); reader.u32();
+		if (reader.varint() !== 1) return { ok: false, code: 400, error: "attestation must contain exactly one operation" };
 		if (reader.varint() !== 9) return { ok: false, code: 400, error: "attestation is not account_create" };
 		reader.bytes(8); reader.u8(); reader.bytes(7);
 		const creator = reader.string();
@@ -234,6 +311,8 @@ export function verifyHiveAttestation(input: HiveAttestationInput, sponsorAccoun
 		const activeKey = hivePublic(readAuthority(reader));
 		const postingKey = hivePublic(readAuthority(reader));
 		const memoKey = hivePublic(reader.bytes(33));
+		reader.string(); // json_metadata
+		if (reader.varint() !== 0 || !reader.done) return { ok: false, code: 400, error: "unexpected attestation extensions or trailing bytes" };
 		if (creator !== sponsorAccount) return { ok: false, code: 400, error: "creator is not the configured sponsor" };
 		if (name !== input.newAccountName) return { ok: false, code: 400, error: "new account name mismatch" };
 		if (ownerKey !== input.ownerKey || activeKey !== input.activeKey || postingKey !== input.postingKey || memoKey !== input.memoKey) return { ok: false, code: 400, error: "attested keys do not match request" };
@@ -244,6 +323,7 @@ export function verifyHiveAttestation(input: HiveAttestationInput, sponsorAccoun
 class TxReader {
 	private position = 0;
 	constructor(private readonly buffer: Buffer) {}
+	get done(): boolean { return this.position === this.buffer.length; }
 	u8(): number { if (this.position >= this.buffer.length) throw new Error("unexpected end"); return this.buffer[this.position++]; }
 	u16(): number { const value = this.buffer.readUInt16LE(this.position); this.position += 2; return value; }
 	u32(): number { const value = this.buffer.readUInt32LE(this.position); this.position += 4; return value; }
@@ -251,5 +331,5 @@ class TxReader {
 	bytes(length: number): Buffer { if (length < 0 || this.position + length > this.buffer.length) throw new Error("unexpected end"); const result = this.buffer.subarray(this.position, this.position + length); this.position += length; return result; }
 	string(): string { return this.bytes(this.varint()).toString("utf8"); }
 }
-function readAuthority(reader: TxReader): Buffer { reader.u32(); const accounts = reader.varint(); if (accounts !== 0) throw new Error("account authorities are not allowed"); const keys = reader.varint(); if (keys !== 1) throw new Error("exactly one key authority is required"); const key = reader.bytes(33); reader.u16(); return key; }
+function readAuthority(reader: TxReader): Buffer { if (reader.u32() !== 1) throw new Error("authority threshold must be one"); const accounts = reader.varint(); if (accounts !== 0) throw new Error("account authorities are not allowed"); const keys = reader.varint(); if (keys !== 1) throw new Error("exactly one key authority is required"); const key = reader.bytes(33); if (reader.u16() !== 1) throw new Error("authority weight must be one"); return key; }
 function hivePublic(bytes: Buffer): string { return new PublicKey(new Uint8Array(bytes)).toString(); }

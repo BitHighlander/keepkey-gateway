@@ -44,4 +44,8 @@ describe("Cloudflare container environment", () => {
 		expect(env.HIVE_SPONSOR_ACCOUNT).toBeUndefined();
 		expect(env.HIVE_SPONSOR_ACTIVE_WIF).toBeUndefined();
 	});
+	test("forwards Hive sponsor credentials and spending limits", () => {
+		const env = containerEnv({ DATABASE_URL: "postgres://test", HIVE_SPONSOR_ACCOUNT: "keepkey", HIVE_SPONSOR_ACTIVE_WIF: "fixture", HIVE_ALLOW_CASH_FEE: "true", HIVE_MAX_CREATION_FEE_MILLIHIVE: "3000" } as any);
+		expect(env).toMatchObject({ HIVE_SPONSOR_ACCOUNT: "keepkey", HIVE_SPONSOR_ACTIVE_WIF: "fixture", HIVE_ALLOW_CASH_FEE: "true", HIVE_MAX_CREATION_FEE_MILLIHIVE: "3000" });
+	});
 });

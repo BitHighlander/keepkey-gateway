@@ -42,6 +42,8 @@ export interface Database extends PersistentCache {
 	getPendingSwap(clientId: string, txHash: string): Promise<StoredPendingSwap | null>;
 	updatePendingSwap(clientId: string, txHash: string, status: string, patch: Record<string, unknown>): Promise<StoredPendingSwap | null>;
 	recordVaultTelemetry(clientId: string, records: Record<string, unknown>[]): Promise<number>;
+	getHiveClaim(ethAddress: string): Promise<{ username: string; txid: string | null; status: string } | null>;
+	markHiveClaimSubmitted(ethAddress: string, txid: string): Promise<void>;
 	reserveHiveClaim(clientId: string, ethAddress: string, username: string): Promise<boolean>;
 	completeHiveClaim(ethAddress: string, txid: string): Promise<void>;
 	releaseHiveClaim(ethAddress: string): Promise<void>;
@@ -225,8 +227,21 @@ export function createDatabase(config: AppConfig): Database {
 			});
 		},
 
+		async getHiveClaim(ethAddress) {
+			const query = cacheConnection.getStore() || sql;
+			const rows = await query`SELECT username, txid, status FROM hive_onboarding_claims WHERE eth_address = ${ethAddress}`;
+			return rows.length ? { username: String(rows[0].username), txid: rows[0].txid ? String(rows[0].txid) : null, status: String(rows[0].status) } : null;
+		},
+
+		async markHiveClaimSubmitted(ethAddress, txid) {
+			const query = cacheConnection.getStore() || sql;
+			const rows = await query`UPDATE hive_onboarding_claims SET txid = ${txid} WHERE eth_address = ${ethAddress} AND status = 'reserving' AND txid IS NULL RETURNING eth_address`;
+			if (rows.length !== 1) throw new Error("Hive claim reservation is unavailable");
+		},
+
 		async reserveHiveClaim(clientId, ethAddress, username) {
-			const rows = await sql`
+			const query = cacheConnection.getStore() || sql;
+			const rows = await query`
 				INSERT INTO hive_onboarding_claims (eth_address, username, client_id)
 				SELECT ${ethAddress}, ${username}, ${clientId}
 				WHERE NOT EXISTS (
@@ -240,11 +255,13 @@ export function createDatabase(config: AppConfig): Database {
 		},
 
 		async completeHiveClaim(ethAddress, txid) {
-			await sql`UPDATE hive_onboarding_claims SET status = 'created', txid = ${txid}, completed_at = now() WHERE eth_address = ${ethAddress}`;
+			const query = cacheConnection.getStore() || sql;
+			await query`UPDATE hive_onboarding_claims SET status = 'created', txid = ${txid}, completed_at = now() WHERE eth_address = ${ethAddress}`;
 		},
 
 		async releaseHiveClaim(ethAddress) {
-			await sql`DELETE FROM hive_onboarding_claims WHERE eth_address = ${ethAddress} AND status = 'reserving'`;
+			const query = cacheConnection.getStore() || sql;
+			await query`DELETE FROM hive_onboarding_claims WHERE eth_address = ${ethAddress} AND status = 'reserving' AND txid IS NULL`;
 		},
 
 		async getFresh<T>(namespace: string, key: string): Promise<T | null> {

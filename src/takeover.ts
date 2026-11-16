@@ -57,7 +57,9 @@ export async function serveTakeover(request: Request, deps: TakeoverDeps): Promi
 		if (read) return toLegacy();
 		throw error;
 	}
-	if (!FALLBACK_STATUS.has(response.status)) return served(response, "gateway");
+	// Sponsored creation belongs to Gateway's claim ledger. Never let an auth
+	// rejection fall through to the legacy sponsor with a separate ledger.
+	if (url.pathname === "/api/v1/hive/create-account" || !FALLBACK_STATUS.has(response.status)) return served(response, "gateway");
 	await response.body?.cancel();
 	return toLegacy();
 }

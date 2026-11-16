@@ -52,6 +52,8 @@ const hive = new HiveClient(database, fetch, {
 	enabled: config.hiveOnboardingEnabled,
 	account: config.hiveSponsorAccount,
 	activeWif: config.hiveSponsorActiveWif,
+	allowCashFee: config.hiveAllowCashFee,
+	maxCreationFeeMilliHive: config.hiveMaxCreationFeeMilliHive,
 	database,
 	evm,
 });
