@@ -144,7 +144,13 @@ export function createApp({ config, database, zerion, evm, market, utxo, portfol
 						quotes: quoteRouter ? "enabled" : "disabled",
 						pendingSwaps: pendingSwaps ? "enabled" : "disabled",
 						hive: hive ? "enabled" : "disabled",
+						hiveOnboarding: hive?.onboardingStatus ?? "disabled",
 					}, 200, requestId, { "Cache-Control": "no-store" });
+				}
+
+				if (request.method === "GET" && url.pathname === "/api/v1/hive/sponsor-info") {
+					if (!hive) throw new HttpError(503, "feature_unavailable", "Hive is unavailable");
+					return json(await hive.sponsorInfo(), 200, requestId, { "Cache-Control": "no-store" });
 				}
 
 				const hiveAccountMatch = url.pathname.match(/^\/api\/v1\/hive\/account\/([^/]+)$/);
@@ -504,7 +510,7 @@ export function createApp({ config, database, zerion, evm, market, utxo, portfol
 				if (error instanceof SwapError) return json({ error: { code: "swap_error", message: error.message, ...(error.details ? { details: error.details } : {}) } }, error.status, requestId);
 				if (error instanceof PendingSwapError) return json({ error: { code: "pending_swap_error", message: error.message } }, error.status, requestId);
 				if (error instanceof CosmosFeatureError) return json({ error: { code: "cosmos_feature_error", message: error.message } }, error.status, requestId);
-				if (error instanceof HiveError) return json({ error: { code: "hive_error", message: error.message } }, error.status, requestId);
+				if (error instanceof HiveError) return json({ success: false, error: error.message, code: "hive_error", ...(error.retryAfter ? { retryAfter: error.retryAfter } : {}) }, error.status, requestId, { "Cache-Control": "no-store", ...(error.retryAfter ? { "Retry-After": String(error.retryAfter) } : {}) });
 				if (error instanceof MultichainBroadcastError) return json({ error: { code: "broadcast_error", message: error.message } }, error.status, requestId);
 				if (error instanceof RealtimeError) return json({ error: { code: "realtime_error", message: error.message } }, error.status, requestId);
 				console.error(JSON.stringify({ event: "request_failed", requestId, method: request.method, path: url.pathname, error: error instanceof Error ? error.message : String(error) }));

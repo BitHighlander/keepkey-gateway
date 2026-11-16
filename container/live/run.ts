@@ -163,7 +163,7 @@ await check("Hive onboarding rejects malformed claims before provider work", asy
 	});
 	const body = await response.json() as any;
 	assert(
-		(response.status === 400 || response.status === 503) && body?.error?.code === "hive_error",
+		(response.status === 400 || response.status === 503) && body?.success === false && body?.code === "hive_error" && typeof body?.error === "string",
 		"Hive onboarding claim did not fail closed",
 	);
 	return { durationMs: Math.round((performance.now() - started) * 100) / 100 };

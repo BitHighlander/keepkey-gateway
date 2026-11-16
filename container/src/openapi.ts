@@ -49,6 +49,9 @@ export function openApiDocument(requestUrl: string): Record<string, unknown> {
 			"/hive/create-account": {
 				post: { operationId: "CreateHiveAccount", security: [{ queryKey: [] }], requestBody: { required: true, content: { "application/json": { schema: objectBody(["username", "ownerKey", "activeKey", "postingKey", "memoKey", "attestation", "ethAddress", "ethSignature"]) } } }, responses: providerResponses("Create an attested, ETH-gated sponsored Hive account") },
 			},
+			"/hive/sponsor-info": {
+				get: { operationId: "GetHiveSponsorInfo", responses: providerResponses("Hive sponsor token pool, cash-fee capacity, and onboarding availability") },
+			},
 			"/hive/tx-params": {
 				get: { operationId: "GetHiveTxParams", responses: providerResponses("Current Hive TaPoS signing parameters") },
 			},

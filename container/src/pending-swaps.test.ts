@@ -42,6 +42,7 @@ function fakeDatabase(): Database & { rows: Map<string, StoredPendingSwap> } {
 		async registerClient() { throw new Error("unused"); }, async authenticate() { return null; },
 		async recordProviderUsage() {}, async reserveZerionRequest() {}, async getProviderUsage() { return {}; },
 		async recordVaultTelemetry() { return 0; },
+		async getHiveClaim() { return null; }, async markHiveClaimSubmitted() {},
 		async reserveHiveClaim() { return false; }, async completeHiveClaim() {}, async releaseHiveClaim() {},
 		async getFresh() { return null; }, async getStale() { return null; }, async set() {}, async runExclusive(_key, task) { return task(); },
 	};

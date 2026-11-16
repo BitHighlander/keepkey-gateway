@@ -37,6 +37,7 @@ jobs:
       - run: make test
         env:
           REALTIME_TEST_DATABASE_URL: postgres://gateway_realtime_test:gateway_realtime_test@127.0.0.1:5432/gateway_realtime_test
+          HIVE_TEST_DATABASE_URL: postgres://gateway_realtime_test:gateway_realtime_test@127.0.0.1:5432/gateway_realtime_test
           CACHE_TEST_DATABASE_URL: postgres://gateway_realtime_test:gateway_realtime_test@127.0.0.1:5432/gateway_realtime_test
           BUDGET_TEST_DATABASE_URL: postgres://gateway_realtime_test:gateway_realtime_test@127.0.0.1:5432/gateway_budget_test
       - run: make typecheck

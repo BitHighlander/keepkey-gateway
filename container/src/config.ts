@@ -13,6 +13,8 @@ export interface AppConfig {
 	swapkitApiKey?: string;
 	zeroxApiKey?: string;
 	hiveOnboardingEnabled: boolean;
+	hiveAllowCashFee: boolean;
+	hiveMaxCreationFeeMilliHive: number;
 	hiveSponsorAccount?: string;
 	hiveSponsorActiveWif?: string;
 }
@@ -60,6 +62,8 @@ export function loadConfig(env: Environment = process.env): AppConfig {
 		swapkitApiKey: env.SWAPKIT_API_KEY?.trim() || undefined,
 		zeroxApiKey: env.ZEROX_API_KEY?.trim() || undefined,
 		hiveOnboardingEnabled: env.HIVE_ONBOARDING_ENABLED?.trim().toLowerCase() === "true",
+		hiveAllowCashFee: env.HIVE_ALLOW_CASH_FEE?.trim().toLowerCase() === "true",
+		hiveMaxCreationFeeMilliHive: integer(env, "HIVE_MAX_CREATION_FEE_MILLIHIVE", 3000, 1, 100000),
 		hiveSponsorAccount: env.HIVE_SPONSOR_ACCOUNT?.trim() || undefined,
 		hiveSponsorActiveWif: env.HIVE_SPONSOR_ACTIVE_WIF?.trim() || undefined,
 	};

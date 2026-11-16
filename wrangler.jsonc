@@ -14,7 +14,9 @@
   "vars": {
     "PORT": "12000",
     "DATABASE_MAX_CONNECTIONS": "5",
-    "HIVE_ONBOARDING_ENABLED": "false",
+    "HIVE_ONBOARDING_ENABLED": "true",
+    "HIVE_ALLOW_CASH_FEE": "true",
+    "HIVE_MAX_CREATION_FEE_MILLIHIVE": "3000",
     // Keep empty until custom-hostname, data-continuity and capacity gates pass.
     // Planned production host: api.keepkey.com.
     // Production pool (src/pool.ts). Hosts listed here get the warm floor, overload
@@ -39,7 +41,9 @@
       "NOWNODES_API_KEY",
       "COINGECKO_API_KEY",
       "SWAPKIT_API_KEY",
-      "ZEROX_API_KEY"
+      "ZEROX_API_KEY",
+      "HIVE_SPONSOR_ACCOUNT",
+      "HIVE_SPONSOR_ACTIVE_WIF"
     ]
   },
   "containers": [
