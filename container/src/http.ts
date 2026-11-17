@@ -329,7 +329,7 @@ export function createApp({ config, database, zerion, evm, market, utxo, portfol
 					return json(await cosmosFeatures.nameQuote(String(body.network || "")), 200, requestId, { "Cache-Control": "no-store" });
 				}
 
-				if (request.method === "POST" && url.pathname === "/api/v1/portfolio/balances") {
+				if (request.method === "POST" && ["/api/v1/portfolio/balances", "/api/v1/portfolio"].includes(url.pathname)) {
 					if (!portfolio) throw new HttpError(503, "feature_unavailable", "Portfolio aggregation is not configured");
 					const client = await authenticated();
 					const body = await bodyObject(request) as unknown as PortfolioRequest;

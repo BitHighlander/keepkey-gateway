@@ -1,3 +1,4 @@
+import { cacheObservation, inheritObservation } from './cache';
 import {providerContext} from './provider-metrics';
 import type { UtxoClient } from "./utxo";
 import type { ZerionClient } from "./zerion";
@@ -54,7 +55,16 @@ export class HistoryClient {
 		const histories = await Promise.all(queries.map(async (query) => {
 			try {
 				const transactions = await this.queryTransactions(query, page, evmTransactions, options);
-				return { caip: query.caip, pubkey: query.pubkey, transactions, fetchedAt: providerContext.getStore()?.cacheOnly ? 0 : fetchedAt, fetchedAtISO: providerContext.getStore()?.cacheOnly ? new Date(0).toISOString() : fetchedAtISO, page, cached: providerContext.getStore()?.cacheOnly===true, fresh: providerContext.getStore()?.cacheOnly!==true, loading: false };
+				const observation = cacheObservation(transactions);
+                // The policy controls paid EVM discovery, not the age of data.
+                // Native providers can make fresh reads during automatic refreshes.
+                const cacheOnly = query.networkId.startsWith('eip155:') && providerContext.getStore()?.cacheOnly === true;
+                const observedAt = observation?.fetchedAt ?? (cacheOnly ? 0 : fetchedAt);
+                const fresh = observation
+                    ? observation.fetchedAt > 0 && observation.freshUntil > Date.now()
+                    : !cacheOnly;
+                return { caip: query.caip, pubkey: query.pubkey, transactions, fetchedAt: observedAt, fetchedAtISO: new Date(observedAt).toISOString(), page,
+                    cached: cacheOnly || (!!observation && observation.fetchedAt < fetchedAt), fresh, loading: false };
 			} catch (error) {
 				return { caip: query.caip, pubkey: query.pubkey, failure: error, fetchedAt, fetchedAtISO, page, cached: false, fresh: false, loading: false };
 			}
@@ -68,13 +78,13 @@ export class HistoryClient {
 	private async queryTransactions(query: { caip: string; pubkey: string; networkId: string }, page: number, evmTransactions: Map<string, Promise<any[]>>, options: { forceRefresh?: boolean }): Promise<any[]> {
 		if (query.networkId.startsWith("bip122:")) {
 			if (!this.dependencies.utxo) throw new HistoryError("UTXO transaction history is not configured", 503);
-			return (await this.dependencies.utxo.getTransactionHistory(query.networkId, query.pubkey, options)).map((transaction) => ({ ...transaction, caip: query.caip, networkId: query.networkId }));
+			const raw = await this.dependencies.utxo.getTransactionHistory(query.networkId, query.pubkey, options);
+            return inheritObservation(raw.map(transaction => ({ ...transaction, caip: query.caip, networkId: query.networkId })), raw);
 		}
 		if (query.networkId.startsWith("eip155:")) {
 			if (!this.dependencies.zerion) throw new HistoryError("EVM transaction history is not configured", 503);
-			return (await evmTransactions.get(query.pubkey.toLowerCase())!)
-				.filter((transaction) => transaction.networkId === query.networkId)
-				.map((transaction) => ({ ...transaction, caip: query.caip }));
+			const raw = await evmTransactions.get(query.pubkey.toLowerCase())!;
+            return inheritObservation(raw.filter(transaction => transaction.networkId === query.networkId).map(transaction => ({ ...transaction, caip: query.caip })), raw);
 		}
 		if (query.networkId.startsWith("hive:")) {
 			if (!this.dependencies.hive) throw new HistoryError("Hive transaction history is not configured", 503);
@@ -84,10 +94,11 @@ export class HistoryClient {
 			const accountName = String(resolved?.account?.name || "");
 			if (!accountName) throw new HistoryError("Hive account lookup returned no account name", 502);
 			const response = await this.dependencies.hive.history(accountName, options) as any;
-			return (Array.isArray(response?.transfers) ? response.transfers : []).map((transfer: any) => normalizeHiveHistory(accountName, query.networkId, transfer));
+			return inheritObservation((Array.isArray(response?.transfers) ? response.transfers : []).map((transfer: any) => normalizeHiveHistory(accountName, query.networkId, transfer)), response);
 		}
 		if (!this.dependencies.multichain) throw new HistoryError("Multichain transaction history is not configured", 503);
-		return (await this.dependencies.multichain.getTransactionHistory(query.caip, query.pubkey, page, options)).map((transaction) => ({ ...transaction, caip: query.caip }));
+		const raw = await this.dependencies.multichain.getTransactionHistory(query.caip, query.pubkey, page, options);
+        return inheritObservation(raw.map(transaction => ({ ...transaction, caip: query.caip })), raw);
 	}
 
 	private validate(body: HistoryRequest): void {

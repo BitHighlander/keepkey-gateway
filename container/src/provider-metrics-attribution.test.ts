@@ -6,16 +6,16 @@ import { ProviderMetrics, type ProviderUsage } from "./provider-metrics";
 import { ZerionClient } from "./zerion";
 import {HistoryClient} from './history';
 
-test('automatic history refreshes cannot force another paid fetch or claim fresh cache data',async()=>{
+test('automatic history refreshes preserve the snapshot age without forcing another paid fetch',async()=>{
  let calls=0;
  const zerion=new ZerionClient({apiKey:'fixture',fetch:(async(input:string|URL|Request)=>{
   calls++;return Response.json(String(input).endsWith('/chains/')?{data:[{id:'ethereum',attributes:{external_id:'0x1'}}]}:{data:[]});
  }) as typeof fetch});
  const app=createApp({config:{} as AppConfig,database:{authenticate:async()=>({id:'fixture',username:'fixture'})} as any,history:new HistoryClient({zerion})});
  const read=(reason:string)=>app.fetch(new Request('http://fixture/api/v1/tx/history?forceRefresh=true',{method:'POST',headers:{Authorization:'fixture','Content-Type':'application/json'},body:JSON.stringify({queries:[{caip:'eip155:1/slip44:60',pubkey:'0x'+'1'.repeat(40)}],refreshReason:reason})}));
- expect((await read('wallet-open')).status).toBe(200);expect(calls).toBe(2);
+ const opening:any=await(await read('wallet-open')).json();expect(calls).toBe(2);
  const automatic:any=await(await read('automatic')).json();
- expect(automatic.histories[0]).toMatchObject({fresh:false,cached:true,fetchedAt:0});expect(calls).toBe(2);
+ expect(automatic.histories[0]).toMatchObject({fresh:true,cached:true,fetchedAt:opening.histories[0].fetchedAt});expect(calls).toBe(2);
  expect((await read('manual')).status).toBe(200);expect(calls).toBe(3);
 });
 

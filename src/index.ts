@@ -6,6 +6,7 @@ import { publicOpenApiResponse } from "./public-openapi";
 import { armPaymentMonitor, runPaymentMonitor, changesDurablePaymentWatches, isInternalRealtimePath, type BackgroundTickResult } from "./realtime-scheduler";
 import { ContainerStartError, prodInstanceId, prodPolicy, serveProd, type PoolEnv } from "./pool";
 import { isTakeoverHost, R2_COINS, serveTakeover } from "./takeover";
+import { forwardGatewayRead, gatewayErrorReason, gatewayFailureResponse } from './gateway-transport';
 
 interface Env extends ContainerRuntimeEnv, PoolEnv {
 	PIONEER_CONTAINER: DurableObjectNamespace<PioneerContainer>;
@@ -46,14 +47,16 @@ export class ProdGatewayContainer extends PioneerContainer {
 
 async function readyContainer<T extends PioneerContainer>(env: Env, namespace: DurableObjectNamespace<T>, instance: string, timeoutMs = 120_000) {
 	const container = getContainer(namespace, instance);
-	await container.startAndWaitForPorts({
+	try { await container.startAndWaitForPorts({
 		ports: [12000],
 		cancellationOptions: { instanceGetTimeoutMS: timeoutMs, portReadyTimeoutMS: timeoutMs, waitInterval: 500 },
 		startOptions: {
 			envVars: containerEnv(env), enableInternet: true,
 			labels: { service: "keepkey-gateway", instance },
 		},
-	});
+	}); } catch (cause) {
+		throw new ContainerStartError('Container was unavailable before dispatch', { cause });
+	}
 	return container;
 }
 
@@ -80,10 +83,10 @@ export class RealtimeWatchdog extends DurableObject<Env> {
 				return await response.json() as BackgroundTickResult;
 			});
 			console.log(JSON.stringify({ event: "background_payment_monitor", ...result }));
-		} catch {
+		} catch (error) {
 			// A storage failure may precede re-arming. Preserve platform retries
 			// as well as the scheduled retry; both paths are idempotent.
-			console.error(JSON.stringify({ event: "background_payment_monitor", error: "tick_failed" }));
+			console.error(JSON.stringify({ event: "background_payment_monitor", error: "tick_failed", reason: gatewayErrorReason(error) }));
 			throw new Error("Background payment monitor tick failed");
 		}
 	}
@@ -98,6 +101,8 @@ export default {
 		let errorCode: string | undefined;
 		let errorReason: string | undefined;
 		const requestId = request.headers.get("x-request-id") || crypto.randomUUID();
+		const forwardMain = (forwarded: Request) => forwardGatewayRead(forwarded,
+			async copy => (await readyContainer(env, env.PIONEER_CONTAINER, MAIN_INSTANCE_ID)).fetch(copy));
 		try {
 			if (isInternalRealtimePath(new URL(request.url).pathname)) {
 				status = 404;
@@ -120,7 +125,7 @@ export default {
 			const upstream = isTakeoverHost(request.url)
 				? await serveTakeover(request, {
 					coin: (name) => fetch(R2_COINS + name, { cf: { cacheEverything: true, cacheTtl: 86400 } }).catch(() => new Response(null, { status: 502 })),
-					gateway: async (forwarded) => (await readyContainer(env, env.PIONEER_CONTAINER, MAIN_INSTANCE_ID)).fetch(forwarded),
+					gateway: forwardMain,
 					legacy: (forwarded) => fetch(forwarded),
 				})
 				: policy.hosts.has(new URL(request.url).hostname.toLowerCase())
@@ -133,7 +138,7 @@ export default {
 					},
 					fetch: (forwarded) => fetch(forwarded),
 				})
-				: await (await readyContainer(env, env.PIONEER_CONTAINER, MAIN_INSTANCE_ID)).fetch(request);
+				: await forwardMain(request);
 			startupMs = Math.round(performance.now() - startedAt);
 			const response = await publicOpenApiResponse(request, upstream);
 			status = response.status;
@@ -163,7 +168,9 @@ export default {
 			return response;
 		} catch (error) {
 			errorName = error instanceof Error ? error.name : "UnknownError";
-			throw error;
+			errorReason = gatewayErrorReason(error);
+			status = 503;
+			return gatewayFailureResponse(request, error, requestId);
 		} finally {
 			const record = JSON.stringify({
 				event: "gateway_request", requestId, method: request.method,
