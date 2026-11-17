@@ -23,14 +23,14 @@ test('automatic HTTP refreshes use cached discovery and fresh native RPC without
  const portfolio=new PortfolioClient({zerion,evm:{getBalance:async()=>{rpc++;return {balance:'2',balanceHex:'0x0'} as any;},getTokenBalance:async()=>({balance:'0'} as any)}});
  const app=createApp({config:{} as AppConfig,database:{authenticate:async()=>({id:'fixture',username:'fixture'})} as any,portfolio});
  const read=(policy:string)=>app.fetch(new Request('http://fixture/api/v1/portfolio/balances?forceRefresh=true',{method:'POST',headers:{Authorization:'fixture','Content-Type':'application/json'},body:JSON.stringify({pubkeys:[{caip:ETH_CAIP,pubkey:ADDRESS}],providerRefreshPolicy:policy,refreshReason:policy==='on-demand'?'wallet-open':'swap-reconcile'})}));
- expect((await read('on-demand')).status).toBe(200);expect(paid).toBe(2);
+ expect((await read('on-demand')).status).toBe(200);expect(paid).toBe(3);
  for(let i=0;i<3;i++){
   const response:any=await(await read('cache-only')).json();
   expect(response.balances[0].balance).toBe('2');expect(response.balances[0].dataSource).toBe('nownodes');
-  expect(response.meta.staleChains).toContain('eip155:1');
+  expect(response.meta.staleChains).toEqual([]);
  }
- expect(paid).toBe(2);expect(rpc).toBe(3);
- expect((await read('unknown')).status).toBe(400);expect(paid).toBe(2);
+ expect(paid).toBe(3);expect(rpc).toBe(3);
+ expect((await read('unknown')).status).toBe(400);expect(paid).toBe(3);
 });
 
 describe("PortfolioClient", () => {

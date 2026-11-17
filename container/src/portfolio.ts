@@ -1,3 +1,4 @@
+import { cacheObservation } from './cache';
 import { providerContext } from './provider-metrics';
 import chainData from "../data/chains.json";
 import { formatUnits, type EvmClient } from "./evm";
@@ -73,7 +74,7 @@ export interface PortfolioResponse {
 		degraded: boolean;
 		degradedCount: number;
 		failures: PortfolioFailure[];
-		staleChains: string[];
+		staleChains: Array<{ caip: string; pubkey: string; ageMs: number; fetchedAtISO: string }>;
 	};
 	defiPositions?: DefiPosition[];
 }
@@ -82,7 +83,7 @@ interface PortfolioDependencies {
 	evm?: Pick<EvmClient, "getBalance" | "getTokenBalance">;
 	utxo?: Pick<UtxoClient, "getPubkeyInfo">;
 	market?: Pick<MarketClient, "getPrices">;
-	zerion?: Pick<ZerionClient, "getWalletPositions" | "getDefiPositions">;
+	zerion?: Pick<ZerionClient, "getWalletPositions" | "getDefiPositions"> & Partial<Pick<ZerionClient, "getTransactions">>;
 	multichain?: Pick<MultichainClient, "getBalances">;
 	hive?: Pick<HiveClient, "account">;
 }
@@ -159,7 +160,7 @@ export class PortfolioClient {
 		const hiveEntries = entries.filter((entry) => entry.networkId.startsWith("hive:"));
 		const multichainEntries = entries.filter((entry) => !entry.networkId.startsWith("bip122:") && !entry.networkId.startsWith("eip155:") && !entry.networkId.startsWith("hive:"));
 
-		await Promise.all(hiveEntries.map(async (entry) => {
+		const hiveReads = Promise.all(hiveEntries.map(async (entry) => {
 			if (!this.dependencies.hive) {
 				failures.push({ caip: entry.caip, reason: "Hive provider is not configured" });
 				return;
@@ -180,7 +181,8 @@ export class PortfolioClient {
 					fetchedAt,
 					fetchedAtISO,
 				});
-				balances.set(balanceKey(native), native);
+				this.applyObservation(native, result);
+                balances.set(balanceKey(native), native);
 
 				const hbd = safeDecimal(account.hbd);
 				if (Number(hbd) > 0) {
@@ -199,29 +201,32 @@ export class PortfolioClient {
 						fetchedAt,
 						fetchedAtISO,
 					});
-					balances.set(balanceKey(token), token);
+					this.applyObservation(token, result);
+                    balances.set(balanceKey(token), token);
 				}
 			} catch (error) {
 				failures.push({ caip: entry.caip, reason: this.reason(error) });
 			}
 		}));
 
-		await Promise.all(multichainEntries.map(async (entry) => {
+		const multichainReads = Promise.all(multichainEntries.map(async (entry) => {
 			if (!this.dependencies.multichain) {
 				failures.push({ caip: entry.caip, reason: `Unsupported portfolio network: ${entry.networkId}` });
 				return;
 			}
 			try {
-				for (const raw of await this.dependencies.multichain.getBalances(entry.caip, entry.pubkey, options)) {
+				const rawBalances = await this.dependencies.multichain.getBalances(entry.caip, entry.pubkey, options);
+                for (const raw of rawBalances) {
 					const item = this.makeBalance({ ...raw, fetchedAt, fetchedAtISO });
-					balances.set(balanceKey(item), item);
+					this.applyObservation(item, rawBalances);
+                    balances.set(balanceKey(item), item);
 				}
 			} catch (error) {
 				failures.push({ caip: entry.caip, reason: this.reason(error) });
 			}
 		}));
 
-		await Promise.all(utxoEntries.map(async (entry) => {
+		const utxoReads = Promise.all(utxoEntries.map(async (entry) => {
 			if (!this.dependencies.utxo) {
 				failures.push({ caip: entry.caip, reason: "UTXO provider is not configured" });
 				return;
@@ -249,7 +254,8 @@ export class PortfolioClient {
 					fetchedAt,
 					fetchedAtISO,
 				});
-				balances.set(balanceKey(balance), balance);
+				this.applyObservation(balance, info);
+                balances.set(balanceKey(balance), balance);
 			} catch (error) {
 				failures.push({ caip: entry.caip, reason: this.reason(error) });
 			}
@@ -258,6 +264,12 @@ export class PortfolioClient {
 		const cacheOnly=providerContext.getStore()?.cacheOnly===true;
 		const positionsByAddress = new Map<string, ZerionWalletPosition[]>();
 		const evmAddresses = [...new Set(evmEntries.map((entry) => entry.pubkey.toLowerCase()))];
+		// Opening/refreshing balances must also initialize the distinct history
+		// snapshot. Automatic requests can join this work but never start paid reads.
+		const reason = providerContext.getStore()?.refreshReason ?? body.refreshReason;
+		const historyWarmup = !cacheOnly && (reason === 'wallet-open' || reason === 'manual') && this.dependencies.zerion?.getTransactions
+			? Promise.allSettled(evmAddresses.map(address => this.dependencies.zerion!.getTransactions!(address, options)))
+			: undefined;
 		if (this.dependencies.zerion) {
 			await Promise.all(evmAddresses.map(async (address) => {
 				try {
@@ -290,7 +302,8 @@ export class PortfolioClient {
 					fetchedAt,
 					fetchedAtISO,
 				});
-				balances.set(balanceKey(nativeBalance), nativeBalance);
+				this.applyObservation(nativeBalance, positions);
+                balances.set(balanceKey(nativeBalance), nativeBalance);
                 }
 
 				for (const token of positions.filter((position) => position.networkId === entry.networkId && position.type === "token")) {
@@ -312,7 +325,14 @@ export class PortfolioClient {
 						fetchedAt,
 						fetchedAtISO,
 					});
-					if(cacheOnly) { tokenBalance.isStale=true; tokenBalance.degraded=true; tokenBalance.verified=false; tokenBalance.dataSource='zerion-cache'; tokenBalance.fetchedAt=0; }
+					this.applyObservation(tokenBalance, positions);
+                    if (cacheOnly) {
+                        tokenBalance.dataSource = 'zerion-cache';
+                        if (!cacheObservation(positions)) {
+                            tokenBalance.isStale = true; tokenBalance.degraded = true; tokenBalance.verified = false;
+                            tokenBalance.fetchedAt = 0; tokenBalance.fetchedAtISO = new Date(0).toISOString();
+                        }
+                    }
                     balances.set(balanceKey(tokenBalance), tokenBalance);
 				}
                 if(!cacheOnly)return;
@@ -334,7 +354,8 @@ export class PortfolioClient {
 					fetchedAt,
 					fetchedAtISO,
 				});
-				balances.set(balanceKey(balance), balance);
+				this.applyObservation(balance, direct);
+                balances.set(balanceKey(balance), balance);
 			} catch (error) {
 				failures.push({ caip: entry.caip, reason: this.reason(error) });
 			}
@@ -371,13 +392,16 @@ export class PortfolioClient {
 						fetchedAt,
 						fetchedAtISO,
 					});
-					balances.set(balanceKey(balance), balance);
+					this.applyObservation(balance, direct);
+                balances.set(balanceKey(balance), balance);
 				} catch (error) {
 					failures.push({ caip, reason: this.reason(error) });
 				}
 			});
 		}));
 
+		// Independent chain families must not wait for one another's providers.
+        await Promise.all([hiveReads, multichainReads, utxoReads]);
 		const unpricedNative = [...balances.values()].filter((balance) => balance.type === "native" && Number(balance.priceUsd) === 0);
 		if (unpricedNative.length > 0 && this.dependencies.market) {
 			try {
@@ -412,6 +436,11 @@ export class PortfolioClient {
 			}
 		}
 
+		const warmedHistory = await historyWarmup;
+		const failedHistory = warmedHistory?.filter(result => result.status === 'rejected').length;
+		if (failedHistory) console.warn(JSON.stringify({ event: 'history_warmup_failed', failed: failedHistory,
+			requestId: providerContext.getStore()?.requestId }));
+		const staleRows = [...balances.values()].filter(row => row.isStale);
 		const response: PortfolioResponse = {
 			balances: [...balances.values()],
 			pendingSwaps: [],
@@ -419,10 +448,11 @@ export class PortfolioClient {
 			meta: {
 				traceId,
 				serverMs: Math.round((performance.now() - startedAt) * 100) / 100,
-				degraded: failures.length > 0,
-				degradedCount: failures.length,
+				degraded: failures.length > 0 || [...balances.values()].some(row => row.isStale),
+				degradedCount: new Set([...failures.map(row => row.caip), ...[...balances.values()].filter(row => row.isStale).map(row => row.caip)]).size,
 				failures,
-				staleChains: cacheOnly ? [...new Set(evmEntries.map(entry=>entry.networkId))] : [],
+				staleChains: staleRows.map(row => ({ caip: row.caip, pubkey: row.pubkey,
+					ageMs: Math.max(0, Date.now() - row.fetchedAt), fetchedAtISO: row.fetchedAtISO })),
 			},
 		};
 		if (body.includeDefi && defiPositions!==undefined) response.defiPositions = defiPositions;
@@ -469,6 +499,16 @@ export class PortfolioClient {
 			isScam: false,
 		};
 	}
+
+    private applyObservation(balance: PortfolioBalance, source: unknown): void {
+        const observation = cacheObservation(source);
+        if (!observation) return; // Legacy adapters retain their existing response contract.
+        balance.fetchedAt = observation.fetchedAt;
+        balance.fetchedAtISO = new Date(observation.fetchedAt).toISOString();
+        balance.isStale = observation.fetchedAt <= 0 || observation.freshUntil <= Date.now();
+        balance.degraded = balance.isStale;
+        balance.verified = !balance.isStale;
+    }
 
 	private reason(error: unknown): string {
 		return error instanceof Error ? error.message : String(error);

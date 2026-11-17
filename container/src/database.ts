@@ -2,7 +2,7 @@ import { reserveProviderRequest, DEFAULT_ZERION_LIMITS } from './provider-budget
 import type { ProviderUsage } from "./provider-metrics";
 import { SQL } from "bun";
 import { AsyncLocalStorage } from "node:async_hooks";
-import type { PersistentCache } from "./cache";
+import type { PersistentCache, StoredCacheEntry } from "./cache";
 import type { AppConfig } from "./config";
 import { migrations } from "./migrations";
 import { createRealtimeStore, type DurableRealtimeStore } from './realtime-store';
@@ -262,6 +262,23 @@ export function createDatabase(config: AppConfig): Database {
 		async releaseHiveClaim(ethAddress) {
 			const query = cacheConnection.getStore() || sql;
 			await query`DELETE FROM hive_onboarding_claims WHERE eth_address = ${ethAddress} AND status = 'reserving' AND txid IS NULL`;
+		},
+
+		async getEntry<T>(namespace: string, key: string, mode: 'fresh' | 'stale'): Promise<StoredCacheEntry<T> | null> {
+			const query = cacheConnection.getStore() || sql;
+			const rows = await query`
+				SELECT payload_json, fetched_at, fresh_until, stale_until, source, version
+				FROM cache_items
+				WHERE namespace = ${namespace} AND key = ${key}
+				AND (CASE WHEN ${mode} = 'fresh' THEN fresh_until ELSE stale_until END) > now()
+			`;
+			if (!rows.length) return null;
+			const row = rows[0];
+			return {
+				value: (typeof row.payload_json === 'string' ? JSON.parse(row.payload_json) : row.payload_json) as T,
+				fetchedAt: new Date(row.fetched_at).getTime(), freshUntil: new Date(row.fresh_until).getTime(),
+				staleUntil: new Date(row.stale_until).getTime(), source: String(row.source), version: String(row.version),
+			};
 		},
 
 		async getFresh<T>(namespace: string, key: string): Promise<T | null> {
