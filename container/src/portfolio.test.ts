@@ -179,6 +179,22 @@ describe("PortfolioClient", () => {
 		expect(result.balances.find((entry) => entry.contract === USDC)).toMatchObject({ balance: "250", type: "token", pubkey: ADDRESS });
 	});
 
+	test("prices Solana tokens through the market, not only natives", async () => {
+		const SOL_CAIP = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp/slip44:501";
+		const SOL_USDC = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp/token:EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+		const solana = (caip: string, type: "native" | "token", symbol: string, balance: string) => ({
+			caip, pubkey: "sol-fixture", address: "sol-fixture", balance, networkId: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+			symbol, name: symbol, decimals: type === "native" ? 9 : 6, type, isNative: type === "native", dataSource: "nownodes-solana",
+		});
+		const client = new PortfolioClient({
+			multichain: { getBalances: async () => [solana(SOL_CAIP, "native", "SOL", "2"), solana(SOL_USDC, "token", "USDC", "553.1103")] },
+			market: { getPrices: async (caips) => { expect(caips).toEqual([SOL_CAIP, SOL_USDC]); return [150, 1]; } },
+		});
+		const result = await client.getBalances({ pubkeys: [{ caip: SOL_CAIP, pubkey: "sol-fixture" }] });
+		expect(result.balances.find((entry) => entry.caip === SOL_USDC)).toMatchObject({ symbol: "USDC", priceUsd: "1", valueUsd: "553.1103" });
+		expect(result.balances.find((entry) => entry.caip === SOL_CAIP)).toMatchObject({ priceUsd: "150", valueUsd: "300" });
+	});
+
 	test("lets a direct extraContracts balance override indexed data", async () => {
 		const client = new PortfolioClient({
 			zerion: {

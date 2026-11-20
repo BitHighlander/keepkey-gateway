@@ -402,7 +402,8 @@ export class PortfolioClient {
 
 		// Independent chain families must not wait for one another's providers.
         await Promise.all([hiveReads, multichainReads, utxoReads]);
-		const unpricedNative = [...balances.values()].filter((balance) => balance.type === "native" && Number(balance.priceUsd) === 0);
+		// Natives, plus Solana tokens: the RPC read has no price of its own (Zerion prices the EVM tokens).
+		const unpricedNative = [...balances.values()].filter((balance) => (balance.type === "native" || balance.networkId.startsWith("solana:")) && Number(balance.priceUsd) === 0);
 		if (unpricedNative.length > 0 && this.dependencies.market) {
 			try {
 				const prices = await this.dependencies.market.getPrices(unpricedNative.map((balance) => balance.caip));
