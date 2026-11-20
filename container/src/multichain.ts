@@ -1,6 +1,7 @@
 import type { PersistentCache } from "./cache";
 import { DemandCache } from "./demand-cache";
 import { formatUnits } from "./evm";
+import assetCatalog from "../data/assets.json";
 
 const COSMOS = {
 	"cosmos:cosmoshub-4": { endpoints: ["https://rest.cosmos.directory/cosmoshub", "https://lcd-cosmoshub.keplr.app"], denom: "uatom", decimals: 6, symbol: "ATOM", name: "Cosmos" },
@@ -22,6 +23,7 @@ export interface MultichainBalance {
 	type: "native" | "token";
 	isNative: boolean;
 	contract?: string;
+	icon?: string;
 	dataSource: string;
 }
 
@@ -78,7 +80,10 @@ export class MultichainClient {
 				const amount = String(info?.tokenAmount?.amount || "");
 				const decimals = Number(info?.tokenAmount?.decimals);
 				if (!mint || !/^\d+$/.test(amount) || !Number.isInteger(decimals)) continue;
-				output.push(balance({ caip: `${networkId}/spl:${mint}`, pubkey: address, networkId, amount, decimals, symbol: mint.slice(0, 6), name: "Solana token", contract: mint, type: "token", dataSource: "nownodes-solana" }));
+				// The catalog and market mapping key SPL tokens as `/token:<mint>` (as Pioneer does), so the balance must too.
+				const tokenCaip = `${networkId}/token:${mint}`;
+				const known = (assetCatalog as Record<string, { symbol?: string; name?: string; icon?: string | null }>)[tokenCaip];
+				output.push(balance({ caip: tokenCaip, pubkey: address, networkId, amount, decimals, symbol: known?.symbol || mint.slice(0, 6), name: known?.name || "Solana token", icon: known?.icon || undefined, contract: mint, type: "token", dataSource: "nownodes-solana" }));
 			}
 		}
 		return output;
@@ -116,9 +121,9 @@ export class MultichainClient {
 	}
 }
 
-function balance(input: { caip: string; pubkey: string; networkId: string; amount: string; decimals: number; symbol: string; name: string; dataSource: string; contract?: string; type?: "native" | "token" }): MultichainBalance {
+function balance(input: { caip: string; pubkey: string; networkId: string; amount: string; decimals: number; symbol: string; name: string; dataSource: string; contract?: string; icon?: string; type?: "native" | "token" }): MultichainBalance {
 	const type = input.type || "native";
-	return { caip: input.caip, pubkey: input.pubkey, address: input.pubkey, balance: formatUnits(BigInt(/^\d+$/.test(input.amount) ? input.amount : "0"), input.decimals), networkId: input.networkId, symbol: input.symbol, name: input.name, decimals: input.decimals, type, isNative: type === "native", contract: input.contract, dataSource: input.dataSource };
+	return { caip: input.caip, pubkey: input.pubkey, address: input.pubkey, balance: formatUnits(BigInt(/^\d+$/.test(input.amount) ? input.amount : "0"), input.decimals), networkId: input.networkId, symbol: input.symbol, name: input.name, decimals: input.decimals, type, isNative: type === "native", contract: input.contract, ...(input.icon ? { icon: input.icon } : {}), dataSource: input.dataSource };
 }
 
 async function getAcross(fetcher: typeof fetch, endpoints: readonly string[], path: string): Promise<any> {

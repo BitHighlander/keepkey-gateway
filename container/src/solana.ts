@@ -150,6 +150,9 @@ export class SolanaClient {
 		const id = ++this.requestId;
 		const responses = await this.rpc({ jsonrpc: "2.0", id, method: "sendTransaction", params: [serialized, { encoding: "base64", skipPreflight: false, preflightCommitment: "confirmed" }] });
 		const response = responses.find((item) => item.id === id);
+		// The RPC refused this transaction (expired blockhash, failed simulation, missing token account):
+		// that is the caller's transaction, not a bad upstream. A 502 hid the reason as "Bad Gateway".
+		if (response?.error) throw new SolanaError(`Solana sendTransaction error ${response.error.code ?? "unknown"}: ${response.error.message || "unknown error"}`, 422);
 		this.requireRpcSuccess(response, "sendTransaction");
 		if (typeof response!.result !== "string" || response!.result.length < 80 || response!.result.length > 90) throw new SolanaError("Solana broadcast returned no signature");
 		return { success: true, txid: response!.result };

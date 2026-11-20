@@ -72,4 +72,13 @@ describe("SolanaClient", () => {
 		const client = new SolanaClient({ apiKey: "test" });
 		expect(client.buildTransfer({ from: FROM, to: TO, amount: "0.1" })).rejects.toBeInstanceOf(SolanaError);
 	});
+
+	test("a transaction the RPC rejects is a 422 with the RPC's reason; a dead RPC stays 502", async () => {
+		const rejected = new SolanaClient({ apiKey: "test", fetch: (async (_input: unknown, init?: RequestInit) => Response.json([{ id: JSON.parse(String(init?.body)).id, error: { code: -32002, message: "Transaction simulation failed: Blockhash not found" } }])) as unknown as typeof fetch });
+		const error = await rejected.broadcast(Buffer.from("tx").toString("base64")).catch((e) => e);
+		expect(error).toBeInstanceOf(SolanaError);
+		expect(error).toMatchObject({ status: 422, message: expect.stringContaining("Blockhash not found") });
+		const down = new SolanaClient({ apiKey: "test", fetch: (async () => new Response("bad gateway", { status: 502 })) as unknown as typeof fetch });
+		expect(await down.broadcast(Buffer.from("tx").toString("base64")).catch((e) => e)).toMatchObject({ status: 502 });
+	});
 });
